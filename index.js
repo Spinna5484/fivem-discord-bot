@@ -9,6 +9,7 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    StringSelectMenuBuilder,
     EmbedBuilder,
     MessageFlags,
     PermissionsBitField
@@ -50,7 +51,9 @@ const COMMAND_CHANNELS = {
     payimpound: process.env.CHANNEL_IMPOUNDED,
     sendtoauction: process.env.CHANNEL_IMPOUNDED,
 
-    mypurchases: process.env.CHANNEL_COLLECT
+    mypurchases: process.env.CHANNEL_COLLECT,
+    myvehicles: process.env.CHANNEL_COLLECT,
+    economy: process.env.CHANNEL_PURCHASE
 };
 
 const STRAIGHT_TO_AUCTION_ROLE_IDS = (process.env.STRAIGHT_TO_AUCTION_ROLE_IDS || '')
@@ -90,6 +93,292 @@ function generatePlate(length = 8) {
     }
     return plate;
 }
+
+const VEHICLE_CATEGORIES = {
+    car: { label: 'Cars', emoji: '🚗' },
+    bike: { label: 'Motorcycles', emoji: '🏍️' },
+    van: { label: 'Vans', emoji: '🚐' },
+    truck: { label: 'Trucks', emoji: '🚛' },
+    bus: { label: 'Buses', emoji: '🚌' },
+    utility: { label: 'Utility', emoji: '🚜' },
+    emergency: { label: 'Emergency', emoji: '🚓' }
+};
+
+function normaliseCategory(category) {
+    const value = String(category || 'car').toLowerCase().trim();
+    return VEHICLE_CATEGORIES[value] ? value : 'car';
+}
+
+function buildCategorySelect() {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId('shop_category_select')
+            .setPlaceholder('Choose a vehicle category')
+            .addOptions(
+                Object.entries(VEHICLE_CATEGORIES).map(([value, data]) => ({
+                    label: data.label,
+                    value,
+                    emoji: data.emoji
+                }))
+            )
+    );
+}
+
+async function ensureVehicleShopColumns() {
+    try {
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN category VARCHAR(50) NOT NULL DEFAULT 'car'`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN image_url TEXT NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_new TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_popular TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
+    } catch (error) {
+        console.error('Vehicle shop schema ensure error:', error);
+    }
+}
+
+async function getAvailableVehiclesForMember(member, category = null) {
+    const [vehicles] = await pool.query('SELECT * FROM bot_vehicle_shop');
+
+    return vehicles
+        .filter(v => !v.required_role_id || member.roles.cache.has(v.required_role_id))
+        .filter(v => !category || normaliseCategory(v.category) === normaliseCategory(category))
+        .sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+}
+
+function buildVehicleListEmbed(category, vehicles) {
+    const cat = VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.car;
+
+    const embed = new EmbedBuilder()
+        .setTitle(`${cat.emoji} ${cat.label} Shop`)
+        .setColor(3447003)
+        .setDescription(vehicles.length ? 'Select a vehicle from the menu below to buy it.' : 'No vehicles are available in this category.')
+        .setTimestamp(new Date());
+
+    for (const vehicle of vehicles.slice(0, 25)) {
+        const tags = [
+            Number(vehicle.is_new) === 1 ? 'NEW' : null,
+            Number(vehicle.is_popular) === 1 ? 'POPULAR' : null
+        ].filter(Boolean);
+
+        embed.addFields({
+            name: `${vehicle.label || vehicle.vehicle_model}${tags.length ? ` • ${tags.join(' • ')}` : ''}`,
+            value: `Model: \`${vehicle.vehicle_model}\`\nPrice: **$${vehicle.price}**`,
+            inline: true
+        });
+    }
+
+    if (vehicles.length > 25) {
+        embed.setFooter({ text: `Showing first 25 of ${vehicles.length}. Use /buyvehicle model if you do not see the vehicle.` });
+    }
+
+    return embed;
+}
+
+function buildVehicleSelect(category, vehicles) {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`shop_vehicle_select:${normaliseCategory(category)}`)
+            .setPlaceholder('Choose a vehicle to purchase')
+            .addOptions(
+                vehicles.slice(0, 25).map(vehicle => ({
+                    label: String(vehicle.label || vehicle.vehicle_model).slice(0, 100),
+                    description: `$${vehicle.price} • ${vehicle.vehicle_model}`.slice(0, 100),
+                    value: String(vehicle.vehicle_model).slice(0, 100)
+                }))
+            )
+    );
+}
+
+function buildPurchaseConfirm(vehicle) {
+    const embed = new EmbedBuilder()
+        .setTitle(`Confirm Purchase • ${vehicle.label || vehicle.vehicle_model}`)
+        .setColor(5763719)
+        .addFields(
+            { name: 'Model', value: `\`${vehicle.vehicle_model}\``, inline: true },
+            { name: 'Price', value: `$${vehicle.price}`, inline: true },
+            { name: 'Category', value: normaliseCategory(vehicle.category), inline: true }
+        )
+        .setTimestamp(new Date());
+
+    if (vehicle.image_url) {
+        embed.setImage(vehicle.image_url);
+    }
+
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`shop_buy_confirm:${vehicle.vehicle_model}`)
+            .setLabel('Buy Vehicle')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('shop_buy_cancel')
+            .setLabel('Cancel')
+            .setStyle(ButtonStyle.Secondary)
+    );
+
+    return { embed, row };
+}
+
+
+function buildEconomyHomeEmbed() {
+    return new EmbedBuilder()
+        .setTitle('Economy Management')
+        .setDescription('Choose what you want to manage.')
+        .setColor(3447003)
+        .addFields(
+            { name: 'Balance', value: 'Check your money.', inline: true },
+            { name: 'Vehicle Shop', value: 'Buy cars, trucks, vans and more.', inline: true },
+            { name: 'My Vehicles', value: 'View your owned vehicles.', inline: true },
+            { name: 'Auctions', value: 'View active auctions.', inline: true },
+            { name: 'Impounds', value: 'View your impounded vehicles.', inline: true }
+        )
+        .setTimestamp(new Date());
+}
+
+function buildEconomyHomeButtons() {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('economy_balance')
+            .setLabel('Balance')
+            .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+            .setCustomId('economy_shop')
+            .setLabel('Vehicle Shop')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('economy_myvehicles')
+            .setLabel('My Vehicles')
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('economy_auctions')
+            .setLabel('Auctions')
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('economy_impounds')
+            .setLabel('Impounds')
+            .setStyle(ButtonStyle.Secondary)
+    );
+}
+
+async function buildMyVehiclesEmbed(discordId) {
+    const [vehicles] = await pool.query(
+        `SELECT vehicle_model, plate, garage, stored
+         FROM bot_owned_vehicles
+         WHERE discord_id = ?
+         ORDER BY vehicle_model ASC`,
+        [discordId]
+    );
+
+    const embed = new EmbedBuilder()
+        .setTitle('My Vehicles')
+        .setColor(5763719)
+        .setTimestamp(new Date());
+
+    if (!vehicles.length) {
+        embed.setDescription('You do not own any claimed vehicles yet.');
+        return embed;
+    }
+
+    for (const vehicle of vehicles.slice(0, 25)) {
+        embed.addFields({
+            name: `${vehicle.vehicle_model} [${vehicle.plate}]`,
+            value: `Garage: **${vehicle.garage || 'out'}**\nStored: **${Number(vehicle.stored) === 1 ? 'Yes' : 'No'}**`,
+            inline: true
+        });
+    }
+
+    if (vehicles.length > 25) {
+        embed.setFooter({ text: `Showing first 25 of ${vehicles.length} vehicles.` });
+    }
+
+    return embed;
+}
+
+async function buildAuctionsText() {
+    const [rows] = await pool.query(
+        `SELECT plate, vehicle_model, start_bid, highest_bid, ends_at, straight_to_auction
+         FROM bot_auctions
+         WHERE status = 'active'
+         ORDER BY ends_at ASC
+         LIMIT 20`
+    );
+
+    if (!rows.length) return 'There are no active auctions right now.';
+
+    return rows.map(r =>
+        `**${r.vehicle_model}** [${r.plate}] | ${Number(r.straight_to_auction) === 1 ? 'Straight' : 'Normal'} | Highest: **$${r.highest_bid}** | Ends: <t:${r.ends_at}:R>`
+    ).join('\n');
+}
+
+async function buildImpoundsText(discordId) {
+    const [rows] = await pool.query(
+        `SELECT plate, vehicle_model, fee, reason, impound_method
+         FROM bot_impounds
+         WHERE owner_discord_id = ? AND status = 'impounded' AND direct_auction = 0
+         ORDER BY impounded_at DESC
+         LIMIT 20`,
+        [discordId]
+    );
+
+    if (!rows.length) return 'You have no active impounds.';
+
+    return rows.map(r =>
+        `**${r.vehicle_model}** [${r.plate}] | Fee: **$${r.fee}** | Method: ${r.impound_method} | Reason: ${r.reason}`
+    ).join('\n');
+}
+
+async function purchaseVehicleForUser(interaction, model) {
+    const discordId = interaction.user.id;
+    const member = await interaction.guild.members.fetch(discordId);
+
+    const [vehicleRows] = await pool.query(
+        'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1',
+        [model]
+    );
+
+    if (!vehicleRows.length) {
+        return interaction.reply({ content: 'Vehicle not found in shop.', flags: MessageFlags.Ephemeral });
+    }
+
+    const vehicle = vehicleRows[0];
+
+    if (vehicle.required_role_id && !member.roles.cache.has(vehicle.required_role_id)) {
+        return interaction.reply({ content: 'You do not have the required role for that vehicle.', flags: MessageFlags.Ephemeral });
+    }
+
+    const [linkRows] = await pool.query('SELECT * FROM bot_links WHERE discord_id = ? LIMIT 1', [discordId]);
+
+    if (!linkRows.length) {
+        return interaction.reply({ content: 'Your Discord is not linked to FiveM yet. Use /linkdiscord in-game first.', flags: MessageFlags.Ephemeral });
+    }
+
+    const [balanceRows] = await pool.query('SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1', [discordId]);
+    const currentBalance = balanceRows.length ? Number(balanceRows[0].balance) : 0;
+
+    if (currentBalance < Number(vehicle.price)) {
+        return interaction.reply({ content: `You need $${vehicle.price} but only have $${currentBalance}.`, flags: MessageFlags.Ephemeral });
+    }
+
+    const plate = generatePlate();
+    const claimCode = generateClaimCode();
+
+    await pool.query('UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?', [vehicle.price, discordId]);
+
+    await pool.query(
+        `INSERT INTO bot_vehicle_purchases
+         (discord_id, license, vehicle_model, plate, claimed, claim_code, claimed_at)
+         VALUES (?, ?, ?, ?, 0, ?, NULL)`,
+        [discordId, linkRows[0].license, vehicle.vehicle_model, plate, claimCode]
+    );
+
+    return interaction.reply({
+        content:
+            `Bought **${vehicle.label || vehicle.vehicle_model}** for **$${vehicle.price}**\n` +
+            `Plate: **${plate}**\n` +
+            `Claim Code: **${claimCode}**\n` +
+            `Go to a dealership ped in-game and enter the code.`,
+        flags: MessageFlags.Ephemeral
+    });
+}
+
 
 async function ensureAuctionColumns() {
     try {
@@ -645,6 +934,7 @@ async function announceNewAuctions() {
 }
 
 const commands = [
+    new SlashCommandBuilder().setName('economy').setDescription('Open the economy management menu'),
     new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
     new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
     new SlashCommandBuilder().setName('work').setDescription('Work for money'),
@@ -659,6 +949,7 @@ const commands = [
         .setDescription('Buy a vehicle')
         .addStringOption(o => o.setName('model').setDescription('Vehicle spawn/model name').setRequired(true)),
     new SlashCommandBuilder().setName('mypurchases').setDescription('View your unclaimed vehicle purchases'),
+    new SlashCommandBuilder().setName('myvehicles').setDescription('View your claimed owned vehicles'),
     new SlashCommandBuilder().setName('impounds').setDescription('View your impounded vehicles'),
     new SlashCommandBuilder()
         .setName('payimpound')
@@ -680,6 +971,7 @@ client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
     await ensureAuctionColumns();
+    await ensureVehicleShopColumns();
 
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
@@ -710,31 +1002,120 @@ client.once('clientReady', async () => {
 
 client.on('interactionCreate', async interaction => {
     try {
-        if (interaction.isButton()) {
-            const [prefix, auctionId, increment] = interaction.customId.split(':');
+        if (interaction.isStringSelectMenu()) {
+            if (interaction.customId === 'shop_category_select') {
+                const category = interaction.values[0];
+                const member = await interaction.guild.members.fetch(interaction.user.id);
+                const vehicles = await getAvailableVehiclesForMember(member, category);
 
-            if (prefix !== 'auction_bid') return;
+                if (!vehicles.length) {
+                    return interaction.update({
+                        content: 'No vehicles are available in that category.',
+                        embeds: [],
+                        components: [buildCategorySelect()]
+                    });
+                }
 
-            const [rows] = await pool.query(
-                `SELECT * FROM bot_auctions WHERE id = ? LIMIT 1`,
-                [auctionId]
-            );
+                return interaction.update({
+                    content: '',
+                    embeds: [buildVehicleListEmbed(category, vehicles)],
+                    components: [buildVehicleSelect(category, vehicles), buildCategorySelect()]
+                });
+            }
 
-            if (!rows.length) {
+            if (interaction.customId.startsWith('shop_vehicle_select:')) {
+                const model = interaction.values[0];
+
+                const [vehicleRows] = await pool.query(
+                    'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1',
+                    [model]
+                );
+
+                if (!vehicleRows.length) {
+                    return interaction.reply({ content: 'Vehicle not found.', flags: MessageFlags.Ephemeral });
+                }
+
+                const { embed, row } = buildPurchaseConfirm(vehicleRows[0]);
+
                 return interaction.reply({
-                    content: 'Auction not found.',
+                    embeds: [embed],
+                    components: [row],
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+        }
+
+        if (interaction.isButton()) {
+            if (interaction.customId === 'economy_balance') {
+                const [rows] = await pool.query('SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1', [interaction.user.id]);
+                const balance = rows.length ? rows[0].balance : 0;
+                return interaction.reply({ content: `Balance: $${balance}`, flags: MessageFlags.Ephemeral });
+            }
+
+            if (interaction.customId === 'economy_shop') {
+                const embed = new EmbedBuilder()
+                    .setTitle('Vehicle Shop')
+                    .setDescription('Choose a category below.')
+                    .setColor(3447003)
+                    .setTimestamp(new Date());
+
+                return interaction.reply({
+                    embeds: [embed],
+                    components: [buildCategorySelect()],
                     flags: MessageFlags.Ephemeral
                 });
             }
 
-            const auction = rows[0];
-            const amount = Number(auction.highest_bid) + Number(increment);
-            const result = await placeAuctionBid(auction, interaction.user.id, amount);
+            if (interaction.customId === 'economy_myvehicles') {
+                return interaction.reply({
+                    embeds: [await buildMyVehiclesEmbed(interaction.user.id)],
+                    flags: MessageFlags.Ephemeral
+                });
+            }
 
-            return interaction.reply({
-                content: result.message,
-                flags: MessageFlags.Ephemeral
-            });
+            if (interaction.customId === 'economy_auctions') {
+                return interaction.reply({
+                    content: await buildAuctionsText(),
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            if (interaction.customId === 'economy_impounds') {
+                return interaction.reply({
+                    content: await buildImpoundsText(interaction.user.id),
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            if (interaction.customId.startsWith('auction_bid:')) {
+                const [prefix, auctionId, increment] = interaction.customId.split(':');
+
+                const [rows] = await pool.query(
+                    `SELECT * FROM bot_auctions WHERE id = ? LIMIT 1`,
+                    [auctionId]
+                );
+
+                if (!rows.length) {
+                    return interaction.reply({ content: 'Auction not found.', flags: MessageFlags.Ephemeral });
+                }
+
+                const auction = rows[0];
+                const amount = Number(auction.highest_bid) + Number(increment);
+                const result = await placeAuctionBid(auction, interaction.user.id, amount);
+
+                return interaction.reply({ content: result.message, flags: MessageFlags.Ephemeral });
+            }
+
+            if (interaction.customId.startsWith('shop_buy_confirm:')) {
+                const model = interaction.customId.split(':')[1];
+                return purchaseVehicleForUser(interaction, model);
+            }
+
+            if (interaction.customId === 'shop_buy_cancel') {
+                return interaction.reply({ content: 'Purchase cancelled.', flags: MessageFlags.Ephemeral });
+            }
+
+            return;
         }
 
         if (!interaction.isChatInputCommand()) return;
@@ -749,6 +1130,21 @@ client.on('interactionCreate', async interaction => {
 
         const discordId = interaction.user.id;
         const user = await ensureUser(discordId);
+
+        if (interaction.commandName === 'economy') {
+            return interaction.reply({
+                embeds: [buildEconomyHomeEmbed()],
+                components: [buildEconomyHomeButtons()],
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'myvehicles') {
+            return interaction.reply({
+                embeds: [await buildMyVehiclesEmbed(discordId)],
+                flags: MessageFlags.Ephemeral
+            });
+        }
 
         if (interaction.commandName === 'balance') {
             const [rows] = await pool.query(
@@ -934,129 +1330,22 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (interaction.commandName === 'shop') {
-            const member = await interaction.guild.members.fetch(discordId);
-            const [vehicles] = await pool.query('SELECT * FROM bot_vehicle_shop');
+            const embed = new EmbedBuilder()
+                .setTitle('🚘 Vehicle Shop')
+                .setDescription('Choose a category below.')
+                .setColor(3447003)
+                .setTimestamp(new Date());
 
-            const available = vehicles.filter(v =>
-                !v.required_role_id || member.roles.cache.has(v.required_role_id)
-            );
-
-            if (!available.length) {
-                return interaction.reply({
-                    content: 'No vehicles available',
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
-            available.sort((a, b) => a.price - b.price);
-
-            const pages = [];
-            let current = '🚗 **Available Vehicles**\n\n';
-
-            for (const v of available) {
-                const line = `**${v.label}** (\`${v.vehicle_model}\`) - $${v.price}\n`;
-
-                if ((current + line).length > 1800) {
-                    pages.push(current);
-                    current = '🚗 **Available Vehicles**\n\n' + line;
-                } else {
-                    current += line;
-                }
-            }
-
-            if (current.trim()) {
-                pages.push(current);
-            }
-
-            await interaction.reply({
-                content: pages[0],
+            return interaction.reply({
+                embeds: [embed],
+                components: [buildCategorySelect()],
                 flags: MessageFlags.Ephemeral
             });
-
-            for (let i = 1; i < pages.length; i++) {
-                await interaction.followUp({
-                    content: pages[i],
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
-            return;
         }
 
         if (interaction.commandName === 'buyvehicle') {
             const model = interaction.options.getString('model').toLowerCase();
-            const member = await interaction.guild.members.fetch(discordId);
-
-            const [vehicleRows] = await pool.query(
-                'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1',
-                [model]
-            );
-
-            if (!vehicleRows.length) {
-                return interaction.reply({
-                    content: 'Vehicle not found in shop.',
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
-            const vehicle = vehicleRows[0];
-
-            if (vehicle.required_role_id && !member.roles.cache.has(vehicle.required_role_id)) {
-                return interaction.reply({
-                    content: 'You do not have the required role for that vehicle.',
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
-            const [linkRows] = await pool.query(
-                'SELECT * FROM bot_links WHERE discord_id = ? LIMIT 1',
-                [discordId]
-            );
-
-            if (!linkRows.length) {
-                return interaction.reply({
-                    content: 'Your Discord is not linked to FiveM yet. Use /linkdiscord in-game first.',
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
-            const [balanceRows] = await pool.query(
-                'SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1',
-                [discordId]
-            );
-
-            const currentBalance = balanceRows.length ? balanceRows[0].balance : 0;
-
-            if (currentBalance < vehicle.price) {
-                return interaction.reply({
-                    content: `You need $${vehicle.price} but only have $${currentBalance}.`,
-                    flags: MessageFlags.Ephemeral
-                });
-            }
-
-            const plate = generatePlate();
-            const claimCode = generateClaimCode();
-
-            await pool.query(
-                'UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?',
-                [vehicle.price, discordId]
-            );
-
-            await pool.query(
-                `INSERT INTO bot_vehicle_purchases
-                 (discord_id, license, vehicle_model, plate, claimed, claim_code, claimed_at)
-                 VALUES (?, ?, ?, ?, 0, ?, NULL)`,
-                [discordId, linkRows[0].license, vehicle.vehicle_model, plate, claimCode]
-            );
-
-            return interaction.reply({
-                content:
-                    `Bought **${vehicle.label}** for **$${vehicle.price}**\n` +
-                    `Plate: **${plate}**\n` +
-                    `Claim Code: **${claimCode}**\n` +
-                    `Go to a dealership ped in-game and enter the code.`,
-                flags: MessageFlags.Ephemeral
-            });
+            return purchaseVehicleForUser(interaction, model);
         }
 
         if (interaction.commandName === 'mypurchases') {
