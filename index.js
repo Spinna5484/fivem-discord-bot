@@ -53,7 +53,11 @@ const COMMAND_CHANNELS = {
 
     mypurchases: process.env.CHANNEL_COLLECT,
     myvehicles: process.env.CHANNEL_COLLECT,
-    economy: process.env.CHANNEL_PURCHASE
+    economy: process.env.CHANNEL_PURCHASE,
+    licences: process.env.CHANNEL_PURCHASE,
+    buylicence: process.env.CHANNEL_PURCHASE,
+    addvehicle: process.env.CHANNEL_PURCHASE,
+    vehicleclasses: process.env.CHANNEL_PURCHASE
 };
 
 const STRAIGHT_TO_AUCTION_ROLE_IDS = (process.env.STRAIGHT_TO_AUCTION_ROLE_IDS || '')
@@ -94,21 +98,26 @@ function generatePlate(length = 8) {
     return plate;
 }
 
-const VEHICLE_PAGE_SIZE = 12;
-
 const VEHICLE_CATEGORIES = {
-    car: { label: 'Cars', emoji: '🚗' },
-    bike: { label: 'Motorcycles', emoji: '🏍️' },
-    van: { label: 'Vans', emoji: '🚐' },
-    truck: { label: 'Trucks', emoji: '🚛' },
-    bus: { label: 'Buses', emoji: '🚌' },
-    utility: { label: 'Utility', emoji: '🚜' },
-    emergency: { label: 'Emergency', emoji: '🚓' }
+    car: { label: 'Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: null },
+    bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: null },
+    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
+    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
+    heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'heavy_vehicle' },
+    taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi_accreditation' },
+    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus_endorsement' },
+    utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: null },
+    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null },
+    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport_security_pass' }
 };
 
 function normaliseCategory(category) {
     const value = String(category || 'car').toLowerCase().trim();
     return VEHICLE_CATEGORIES[value] ? value : 'car';
+}
+
+function getCategoryData(category) {
+    return VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.car;
 }
 
 function buildCategorySelect() {
@@ -132,38 +141,146 @@ async function ensureVehicleShopColumns() {
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN image_url TEXT NULL`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_new TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_popular TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN vehicle_class VARCHAR(50) NULL`).catch(() => {});
     } catch (error) {
         console.error('Vehicle shop schema ensure error:', error);
     }
 }
 
-async function getAvailableVehiclesForMember(member, category = null) {
+
+const LICENCE_SHOP = {
+    heavy_vehicle: { label: 'Heavy Vehicle Licence / CDL', price: 2500, description: 'Required for heavy trucks and trailer vehicles.' },
+    taxi_accreditation: { label: 'Taxi Accreditation', price: 800, description: 'Required for taxi vehicles and taxi work.' },
+    bus_endorsement: { label: 'Bus Endorsement', price: 1200, description: 'Required for bus and coach vehicles.' },
+    tow_permit: { label: 'Tow Endorsement', price: 1000, description: 'Required for tow trucks and recovery vehicles.' },
+    airport_security_pass: { label: 'Airport Security Pass', price: 2000, description: 'Required for airport cargo vehicles.' },
+    fuel_tanker: { label: 'Fuel Tanker Endorsement', price: 3000, description: 'Required for tanker/fuel delivery vehicles.' }
+};
+
+async function ensureLicenceColumns() {
+    try {
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN required_licence VARCHAR(100) NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN vehicle_class VARCHAR(50) NULL`).catch(() => {});
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_job_licences (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                discord_id VARCHAR(50) NOT NULL,
+                licence VARCHAR(100) NOT NULL,
+                active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at BIGINT NULL,
+                UNIQUE KEY uniq_discord_licence (discord_id, licence)
+            )
+        `).catch(() => {});
+    } catch (error) {
+        console.error('Licence schema ensure error:', error);
+    }
+}
+
+async function hasLicence(discordId, licence) {
+    if (!licence) return true;
+    const [rows] = await pool.query(
+        'SELECT id FROM bot_job_licences WHERE discord_id = ? AND licence = ? AND active = 1 LIMIT 1',
+        [discordId, licence]
+    );
+    return rows.length > 0;
+}
+
+function buildLicencesEmbed(owned = []) {
+    const ownedSet = new Set(owned.map(r => r.licence));
+    const embed = new EmbedBuilder()
+        .setTitle('Licences & Endorsements')
+        .setDescription('Buy the correct licence before purchasing restricted vehicles.')
+        .setColor(3447003)
+        .setTimestamp(new Date());
+
+    for (const [key, data] of Object.entries(LICENCE_SHOP)) {
+        embed.addFields({
+            name: `${ownedSet.has(key) ? 'Owned' : 'Not Owned'} - ${data.label}`,
+            value: `Code: \`${key}\`\nPrice: **$${data.price}**\n${data.description}`,
+            inline: true
+        });
+    }
+    return embed;
+}
+
+function buildLicenceSelect() {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId('licence_select')
+            .setPlaceholder('Choose a licence to buy')
+            .addOptions(
+                Object.entries(LICENCE_SHOP).map(([key, data]) => ({
+                    label: data.label.slice(0, 100),
+                    description: `$${data.price} - ${data.description}`.slice(0, 100),
+                    value: key
+                }))
+            )
+    );
+}
+
+async function buyLicenceForUser(interaction, licence) {
+    const discordId = interaction.user.id;
+    const data = LICENCE_SHOP[licence];
+
+    if (!data) {
+        return interaction.reply({ content: 'That licence does not exist.', flags: MessageFlags.Ephemeral });
+    }
+
+    const already = await hasLicence(discordId, licence);
+    if (already) {
+        return interaction.reply({ content: `You already have **${data.label}**.`, flags: MessageFlags.Ephemeral });
+    }
+
+    const user = await ensureUser(discordId);
+    if (Number(user.balance) < Number(data.price)) {
+        return interaction.reply({ content: `You need $${data.price} but only have $${user.balance}.`, flags: MessageFlags.Ephemeral });
+    }
+
+    await pool.query('UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?', [data.price, discordId]);
+    await pool.query(
+        `INSERT INTO bot_job_licences (discord_id, licence, active, created_at)
+         VALUES (?, ?, 1, ?)
+         ON DUPLICATE KEY UPDATE active = 1, created_at = VALUES(created_at)`,
+        [discordId, licence, Math.floor(Date.now() / 1000)]
+    );
+
+    return interaction.reply({ content: `Bought **${data.label}** for **$${data.price}**.`, flags: MessageFlags.Ephemeral });
+}
+
+
+async function getAvailableVehiclesForMember(member, section = null) {
     const [vehicles] = await pool.query('SELECT * FROM bot_vehicle_shop');
+    const sectionData = section ? getCategoryData(section) : null;
 
     return vehicles
         .filter(v => !v.required_role_id || member.roles.cache.has(v.required_role_id))
-        .filter(v => !category || normaliseCategory(v.category) === normaliseCategory(category))
+        .filter(v => {
+            if (!sectionData) return true;
+
+            const vehicleCategory = String(v.category || 'car').toLowerCase().trim();
+            const vehicleClass = v.vehicle_class ? String(v.vehicle_class).toLowerCase().trim() : null;
+
+            if (vehicleCategory !== sectionData.category) return false;
+
+            if (sectionData.vehicle_class) {
+                return vehicleClass === sectionData.vehicle_class;
+            }
+
+            return true;
+        })
         .sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
 }
 
-function buildVehicleListEmbed(category, vehicles, page = 0) {
+function buildVehicleListEmbed(category, vehicles) {
     const cat = VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.car;
-    const totalPages = Math.max(1, Math.ceil(vehicles.length / VEHICLE_PAGE_SIZE));
-    const safePage = Math.min(Math.max(Number(page) || 0, 0), totalPages - 1);
-    const startIndex = safePage * VEHICLE_PAGE_SIZE;
-    const pageVehicles = vehicles.slice(startIndex, startIndex + VEHICLE_PAGE_SIZE);
 
     const embed = new EmbedBuilder()
         .setTitle(`${cat.emoji} ${cat.label} Shop`)
         .setColor(3447003)
-        .setDescription(
-            vehicles.length
-                ? `Select a vehicle from the menu below to buy it.\nPage **${safePage + 1} / ${totalPages}**`
-                : 'No vehicles are available in this category.'
-        )
+        .setDescription(vehicles.length ? 'Select a vehicle from the menu below to buy it.' : 'No vehicles are available in this category.')
         .setTimestamp(new Date());
 
-    for (const vehicle of pageVehicles) {
+    for (const vehicle of vehicles.slice(0, 25)) {
         const tags = [
             Number(vehicle.is_new) === 1 ? 'NEW' : null,
             Number(vehicle.is_popular) === 1 ? 'POPULAR' : null
@@ -171,28 +288,25 @@ function buildVehicleListEmbed(category, vehicles, page = 0) {
 
         embed.addFields({
             name: `${vehicle.label || vehicle.vehicle_model}${tags.length ? ` • ${tags.join(' • ')}` : ''}`,
-            value: `Model: \`${vehicle.vehicle_model}\`\nPrice: **$${vehicle.price}**`,
+            value: `Model: \`${vehicle.vehicle_model}\`\nPrice: **$${vehicle.price}**\nClass: **${vehicle.vehicle_class || 'None'}**\nLicence: **${vehicle.required_licence || 'None'}**`,
             inline: true
         });
     }
 
-    embed.setFooter({ text: `Showing ${pageVehicles.length ? startIndex + 1 : 0}-${Math.min(startIndex + VEHICLE_PAGE_SIZE, vehicles.length)} of ${vehicles.length}` });
+    if (vehicles.length > 25) {
+        embed.setFooter({ text: `Showing first 25 of ${vehicles.length}. Use /buyvehicle model if you do not see the vehicle.` });
+    }
 
     return embed;
 }
 
-function buildVehicleSelect(category, vehicles, page = 0) {
-    const totalPages = Math.max(1, Math.ceil(vehicles.length / VEHICLE_PAGE_SIZE));
-    const safePage = Math.min(Math.max(Number(page) || 0, 0), totalPages - 1);
-    const startIndex = safePage * VEHICLE_PAGE_SIZE;
-    const pageVehicles = vehicles.slice(startIndex, startIndex + VEHICLE_PAGE_SIZE);
-
+function buildVehicleSelect(category, vehicles) {
     return new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-            .setCustomId(`shop_vehicle_select:${normaliseCategory(category)}:${safePage}`)
+            .setCustomId(`shop_vehicle_select:${normaliseCategory(category)}`)
             .setPlaceholder('Choose a vehicle to purchase')
             .addOptions(
-                pageVehicles.map(vehicle => ({
+                vehicles.slice(0, 25).map(vehicle => ({
                     label: String(vehicle.label || vehicle.vehicle_model).slice(0, 100),
                     description: `$${vehicle.price} • ${vehicle.vehicle_model}`.slice(0, 100),
                     value: String(vehicle.vehicle_model).slice(0, 100)
@@ -201,40 +315,22 @@ function buildVehicleSelect(category, vehicles, page = 0) {
     );
 }
 
-function buildShopPageButtons(category, page, totalVehicles) {
-    const totalPages = Math.max(1, Math.ceil(totalVehicles / VEHICLE_PAGE_SIZE));
-    const safePage = Math.min(Math.max(Number(page) || 0, 0), totalPages - 1);
 
-    return new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`shop_page:${normaliseCategory(category)}:${safePage - 1}`)
-            .setLabel('Previous')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(safePage <= 0),
-        new ButtonBuilder()
-            .setCustomId(`shop_page:${normaliseCategory(category)}:${safePage + 1}`)
-            .setLabel('Next')
-            .setStyle(ButtonStyle.Primary)
-            .setDisabled(safePage >= totalPages - 1),
-        new ButtonBuilder()
-            .setCustomId('shop_back_categories')
-            .setLabel('Categories')
-            .setStyle(ButtonStyle.Secondary)
-    );
+function licenceForSection(section) {
+    const data = getCategoryData(section);
+    return data.required_licence || null;
 }
 
-function buildShopComponents(category, vehicles, page = 0) {
-    const components = [];
-
-    if (vehicles.length) {
-        components.push(buildVehicleSelect(category, vehicles, page));
-    }
-
-    components.push(buildShopPageButtons(category, page, vehicles.length));
-    components.push(buildCategorySelect());
-
-    return components;
+function classForSection(section) {
+    const data = getCategoryData(section);
+    return data.vehicle_class || null;
 }
+
+function categoryForSection(section) {
+    const data = getCategoryData(section);
+    return data.category || normaliseCategory(section);
+}
+
 
 function buildPurchaseConfirm(vehicle) {
     const embed = new EmbedBuilder()
@@ -243,7 +339,8 @@ function buildPurchaseConfirm(vehicle) {
         .addFields(
             { name: 'Model', value: `\`${vehicle.vehicle_model}\``, inline: true },
             { name: 'Price', value: `$${vehicle.price}`, inline: true },
-            { name: 'Category', value: normaliseCategory(vehicle.category), inline: true }
+            { name: 'Category', value: `${vehicle.category || 'car'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
+            { name: 'Licence', value: vehicle.required_licence ? `Required: ${vehicle.required_licence}` : 'None', inline: true }
         )
         .setTimestamp(new Date());
 
@@ -390,6 +487,17 @@ async function purchaseVehicleForUser(interaction, model) {
 
     if (vehicle.required_role_id && !member.roles.cache.has(vehicle.required_role_id)) {
         return interaction.reply({ content: 'You do not have the required role for that vehicle.', flags: MessageFlags.Ephemeral });
+    }
+
+    if (vehicle.required_licence) {
+        const allowed = await hasLicence(discordId, vehicle.required_licence);
+        if (!allowed) {
+            const licenceData = LICENCE_SHOP[vehicle.required_licence];
+            return interaction.reply({
+                content: `You need **${licenceData ? licenceData.label : vehicle.required_licence}** to buy this vehicle. Use /licences first.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
     }
 
     const [linkRows] = await pool.query('SELECT * FROM bot_links WHERE discord_id = ? LIMIT 1', [discordId]);
@@ -983,6 +1091,11 @@ async function announceNewAuctions() {
 
 const commands = [
     new SlashCommandBuilder().setName('economy').setDescription('Open the economy management menu'),
+    new SlashCommandBuilder().setName('licences').setDescription('View and buy licences'),
+    new SlashCommandBuilder()
+        .setName('buylicence')
+        .setDescription('Buy a licence')
+        .addStringOption(o => o.setName('licence').setDescription('Licence code').setRequired(true)),
     new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
     new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
     new SlashCommandBuilder().setName('work').setDescription('Work for money'),
@@ -991,6 +1104,27 @@ const commands = [
         .setName('buyrole')
         .setDescription('Buy a role')
         .addStringOption(o => o.setName('name').setDescription('Role name').setRequired(true)),
+    new SlashCommandBuilder().setName('vehicleclasses').setDescription('View vehicle shop sections and licence rules'),
+    new SlashCommandBuilder()
+        .setName('addvehicle')
+        .setDescription('Admin: add or update a shop vehicle')
+        .addStringOption(o => o.setName('model').setDescription('Vehicle spawn/model name').setRequired(true))
+        .addStringOption(o => o.setName('label').setDescription('Display name').setRequired(true))
+        .addIntegerOption(o => o.setName('price').setDescription('Vehicle price').setRequired(true))
+        .addStringOption(o => o.setName('section').setDescription('Shop section').setRequired(true)
+            .addChoices(
+                { name: 'Cars', value: 'car' },
+                { name: 'Motorcycles', value: 'bike' },
+                { name: 'Vans', value: 'van' },
+                { name: 'Light Trucks - No CDL', value: 'light_truck' },
+                { name: 'Heavy Trucks - CDL', value: 'heavy_truck' },
+                { name: 'Taxi - Accreditation', value: 'taxi' },
+                { name: 'Buses - Bus Endorsement', value: 'bus' },
+                { name: 'Utility / Tow', value: 'utility' },
+                { name: 'Emergency', value: 'emergency' },
+                { name: 'Airport', value: 'airport' }
+            ))
+        .addStringOption(o => o.setName('roleid').setDescription('Optional required Discord role ID').setRequired(false)),
     new SlashCommandBuilder().setName('shop').setDescription('View vehicles'),
     new SlashCommandBuilder()
         .setName('buyvehicle')
@@ -1020,6 +1154,7 @@ client.once('clientReady', async () => {
 
     await ensureAuctionColumns();
     await ensureVehicleShopColumns();
+    await ensureLicenceColumns();
 
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
@@ -1051,6 +1186,10 @@ client.once('clientReady', async () => {
 client.on('interactionCreate', async interaction => {
     try {
         if (interaction.isStringSelectMenu()) {
+            if (interaction.customId === 'licence_select') {
+                return buyLicenceForUser(interaction, interaction.values[0]);
+            }
+
             if (interaction.customId === 'shop_category_select') {
                 const category = interaction.values[0];
                 const member = await interaction.guild.members.fetch(interaction.user.id);
@@ -1066,8 +1205,8 @@ client.on('interactionCreate', async interaction => {
 
                 return interaction.update({
                     content: '',
-                    embeds: [buildVehicleListEmbed(category, vehicles, 0)],
-                    components: buildShopComponents(category, vehicles, 0)
+                    embeds: [buildVehicleListEmbed(category, vehicles)],
+                    components: [buildVehicleSelect(category, vehicles), buildCategorySelect()]
                 });
             }
 
@@ -1135,41 +1274,6 @@ client.on('interactionCreate', async interaction => {
                 });
             }
 
-            if (interaction.customId.startsWith('shop_page:')) {
-                const [, category, pageValue] = interaction.customId.split(':');
-                const page = Number(pageValue) || 0;
-                const member = await interaction.guild.members.fetch(interaction.user.id);
-                const vehicles = await getAvailableVehiclesForMember(member, category);
-
-                if (!vehicles.length) {
-                    return interaction.update({
-                        content: 'No vehicles are available in that category.',
-                        embeds: [],
-                        components: [buildCategorySelect()]
-                    });
-                }
-
-                return interaction.update({
-                    content: '',
-                    embeds: [buildVehicleListEmbed(category, vehicles, page)],
-                    components: buildShopComponents(category, vehicles, page)
-                });
-            }
-
-            if (interaction.customId === 'shop_back_categories') {
-                const embed = new EmbedBuilder()
-                    .setTitle('Vehicle Shop')
-                    .setDescription('Choose a category below.')
-                    .setColor(3447003)
-                    .setTimestamp(new Date());
-
-                return interaction.update({
-                    content: '',
-                    embeds: [embed],
-                    components: [buildCategorySelect()]
-                });
-            }
-
             if (interaction.customId.startsWith('auction_bid:')) {
                 const [prefix, auctionId, increment] = interaction.customId.split(':');
 
@@ -1227,6 +1331,24 @@ client.on('interactionCreate', async interaction => {
                 embeds: [await buildMyVehiclesEmbed(discordId)],
                 flags: MessageFlags.Ephemeral
             });
+        }
+
+        if (interaction.commandName === 'licences') {
+            const [owned] = await pool.query(
+                'SELECT licence FROM bot_job_licences WHERE discord_id = ? AND active = 1',
+                [discordId]
+            );
+
+            return interaction.reply({
+                embeds: [buildLicencesEmbed(owned)],
+                components: [buildLicenceSelect()],
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'buylicence') {
+            const licence = interaction.options.getString('licence').toLowerCase();
+            return buyLicenceForUser(interaction, licence);
         }
 
         if (interaction.commandName === 'balance') {
@@ -1408,6 +1530,70 @@ client.on('interactionCreate', async interaction => {
 
             return interaction.reply({
                 content: result.message,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'vehicleclasses') {
+            const lines = Object.entries(VEHICLE_CATEGORIES).map(([key, data]) =>
+                `**${data.label}** (\`${key}\`) | category: \`${data.category}\` | class: \`${data.vehicle_class || 'none'}\` | licence: \`${data.required_licence || 'none'}\``
+            );
+
+            return interaction.reply({
+                content: lines.join('\n'),
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'addvehicle') {
+            const member = await interaction.guild.members.fetch(discordId);
+
+            if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+                return interaction.reply({
+                    content: 'You need Administrator permission to use /addvehicle.',
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            const model = interaction.options.getString('model').toLowerCase().trim();
+            const label = interaction.options.getString('label').trim();
+            const price = interaction.options.getInteger('price');
+            const section = interaction.options.getString('section');
+            const roleId = interaction.options.getString('roleid');
+
+            if (!model || !label || !price || price <= 0) {
+                return interaction.reply({
+                    content: 'Invalid vehicle details.',
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            const category = categoryForSection(section);
+            const vehicleClass = classForSection(section);
+            const requiredLicence = licenceForSection(section);
+
+            await pool.query(
+                `INSERT INTO bot_vehicle_shop
+                 (vehicle_model, label, price, required_role_id, category, vehicle_class, required_licence)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                    label = VALUES(label),
+                    price = VALUES(price),
+                    required_role_id = VALUES(required_role_id),
+                    category = VALUES(category),
+                    vehicle_class = VALUES(vehicle_class),
+                    required_licence = VALUES(required_licence)`,
+                [model, label, price, roleId || null, category, vehicleClass, requiredLicence]
+            );
+
+            return interaction.reply({
+                content:
+                    `Vehicle saved: **${label}** (\`${model}\`)\n` +
+                    `Price: **$${price}**\n` +
+                    `Section: **${getCategoryData(section).label}**\n` +
+                    `Category: \`${category}\`\n` +
+                    `Class: \`${vehicleClass || 'none'}\`\n` +
+                    `Required Licence: \`${requiredLicence || 'none'}\``,
                 flags: MessageFlags.Ephemeral
             });
         }
