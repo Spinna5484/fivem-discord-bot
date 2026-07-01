@@ -1,4 +1,4 @@
-require('dotenv').config();
+equire('dotenv').config();
 
 const {
     Client,
@@ -103,12 +103,12 @@ const VEHICLE_CATEGORIES = {
     bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: null },
     van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
     light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
-    heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'heavy_vehicle' },
-    taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi_accreditation' },
-    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus_endorsement' },
+    heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'cdl' },
+    taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi' },
+    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus' },
     utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: null },
     emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null },
-    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport_security_pass' }
+    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport' }
 };
 
 const SHOP_PAGE_SIZE = 10;
@@ -151,12 +151,12 @@ async function ensureVehicleShopColumns() {
 
 
 const LICENCE_SHOP = {
-    heavy_vehicle: { label: 'Heavy Vehicle Licence / CDL', price: 2500, description: 'Required for heavy trucks and trailer vehicles.' },
-    taxi_accreditation: { label: 'Taxi Accreditation', price: 800, description: 'Required for taxi vehicles and taxi work.' },
-    bus_endorsement: { label: 'Bus Endorsement', price: 1200, description: 'Required for bus and coach vehicles.' },
-    tow_permit: { label: 'Tow Endorsement', price: 1000, description: 'Required for tow trucks and recovery vehicles.' },
-    airport_security_pass: { label: 'Airport Security Pass', price: 2000, description: 'Required for airport cargo vehicles.' },
-    fuel_tanker: { label: 'Fuel Tanker Endorsement', price: 3000, description: 'Required for tanker/fuel delivery vehicles.' }
+    cdl: { label: 'Commercial Driver License (CDL)', price: 10000, description: 'Required for heavy trucks and trailer vehicles.' },
+    taxi: { label: 'Taxi Driver Permit', price: 2500, description: 'Required for taxi vehicles and taxi work.' },
+    bus: { label: 'Passenger Endorsement', price: 5000, description: 'Required for bus and coach vehicles.' },
+    tow: { label: 'Tow Operator Permit', price: 3500, description: 'Required for tow trucks and recovery vehicles.' },
+    airport: { label: 'Airport Security Pass', price: 2000, description: 'Required for airport cargo vehicles.' },
+    tanker: { label: 'Hazmat / Tanker Endorsement', price: 7500, description: 'Required for tanker/fuel delivery vehicles.' }
 };
 
 async function ensureLicenceColumns() {
