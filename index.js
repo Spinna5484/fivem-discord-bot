@@ -111,6 +111,8 @@ const VEHICLE_CATEGORIES = {
     airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport_security_pass' }
 };
 
+const SHOP_PAGE_SIZE = 10;
+
 function normaliseCategory(category) {
     const value = String(category || 'car').toLowerCase().trim();
     return VEHICLE_CATEGORIES[value] ? value : 'car';
@@ -271,16 +273,23 @@ async function getAvailableVehiclesForMember(member, section = null) {
         .sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
 }
 
-function buildVehicleListEmbed(category, vehicles) {
-    const cat = VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.car;
+function buildVehicleListEmbed(section, vehicles, page = 0) {
+    const cat = getCategoryData(section);
+    const totalPages = Math.max(1, Math.ceil(vehicles.length / SHOP_PAGE_SIZE));
+    const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+    const pageItems = vehicles.slice(safePage * SHOP_PAGE_SIZE, (safePage + 1) * SHOP_PAGE_SIZE);
 
     const embed = new EmbedBuilder()
         .setTitle(`${cat.emoji} ${cat.label} Shop`)
         .setColor(3447003)
-        .setDescription(vehicles.length ? 'Select a vehicle from the menu below to buy it.' : 'No vehicles are available in this category.')
+        .setDescription(
+            vehicles.length
+                ? `Select a vehicle from the menu below to buy it.\nPage **${safePage + 1}/${totalPages}**`
+                : 'No vehicles are available in this section.'
+        )
         .setTimestamp(new Date());
 
-    for (const vehicle of vehicles.slice(0, 25)) {
+    for (const vehicle of pageItems) {
         const tags = [
             Number(vehicle.is_new) === 1 ? 'NEW' : null,
             Number(vehicle.is_popular) === 1 ? 'POPULAR' : null
@@ -288,25 +297,48 @@ function buildVehicleListEmbed(category, vehicles) {
 
         embed.addFields({
             name: `${vehicle.label || vehicle.vehicle_model}${tags.length ? ` • ${tags.join(' • ')}` : ''}`,
-            value: `Model: \`${vehicle.vehicle_model}\`\nPrice: **$${vehicle.price}**\nClass: **${vehicle.vehicle_class || 'None'}**\nLicence: **${vehicle.required_licence || 'None'}**`,
+            value:
+                `Model: \`${vehicle.vehicle_model}\`\n` +
+                `Price: **$${vehicle.price}**\n` +
+                `Class: **${vehicle.vehicle_class || 'None'}**\n` +
+                `Licence: **${vehicle.required_licence || 'None'}**`,
             inline: true
         });
     }
 
-    if (vehicles.length > 25) {
-        embed.setFooter({ text: `Showing first 25 of ${vehicles.length}. Use /buyvehicle model if you do not see the vehicle.` });
-    }
-
+    embed.setFooter({ text: `${vehicles.length} vehicle(s) in this section` });
     return embed;
 }
 
-function buildVehicleSelect(category, vehicles) {
+function buildShopPageButtons(section, page, totalVehicles) {
+    const totalPages = Math.max(1, Math.ceil(totalVehicles / SHOP_PAGE_SIZE));
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`shop_page:${normaliseCategory(section)}:${Math.max(page - 1, 0)}`)
+            .setLabel('Previous')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page <= 0),
+        new ButtonBuilder()
+            .setCustomId(`shop_page:${normaliseCategory(section)}:${Math.min(page + 1, totalPages - 1)}`)
+            .setLabel('Next')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(page >= totalPages - 1),
+        new ButtonBuilder()
+            .setCustomId('shop_back_categories')
+            .setLabel('Back to Categories')
+            .setStyle(ButtonStyle.Secondary)
+    );
+}
+
+function buildVehicleSelect(section, vehicles, page = 0) {
+    const pageItems = vehicles.slice(page * SHOP_PAGE_SIZE, (page + 1) * SHOP_PAGE_SIZE);
+
     return new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-            .setCustomId(`shop_vehicle_select:${normaliseCategory(category)}`)
+            .setCustomId(`shop_vehicle_select:${normaliseCategory(section)}:${page}`)
             .setPlaceholder('Choose a vehicle to purchase')
             .addOptions(
-                vehicles.slice(0, 25).map(vehicle => ({
+                pageItems.map(vehicle => ({
                     label: String(vehicle.label || vehicle.vehicle_model).slice(0, 100),
                     description: `$${vehicle.price} • ${vehicle.vehicle_model}`.slice(0, 100),
                     value: String(vehicle.vehicle_model).slice(0, 100)
@@ -314,23 +346,6 @@ function buildVehicleSelect(category, vehicles) {
             )
     );
 }
-
-
-function licenceForSection(section) {
-    const data = getCategoryData(section);
-    return data.required_licence || null;
-}
-
-function classForSection(section) {
-    const data = getCategoryData(section);
-    return data.vehicle_class || null;
-}
-
-function categoryForSection(section) {
-    const data = getCategoryData(section);
-    return data.category || normaliseCategory(section);
-}
-
 
 function buildPurchaseConfirm(vehicle) {
     const embed = new EmbedBuilder()
@@ -1205,8 +1220,8 @@ client.on('interactionCreate', async interaction => {
 
                 return interaction.update({
                     content: '',
-                    embeds: [buildVehicleListEmbed(category, vehicles)],
-                    components: [buildVehicleSelect(category, vehicles), buildCategorySelect()]
+                    embeds: [buildVehicleListEmbed(category, vehicles, 0)],
+                    components: [buildVehicleSelect(category, vehicles, 0), buildShopPageButtons(category, 0, vehicles.length)]
                 });
             }
 
@@ -1242,7 +1257,7 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'economy_shop') {
                 const embed = new EmbedBuilder()
                     .setTitle('Vehicle Shop')
-                    .setDescription('Choose a category below.')
+                    .setDescription('Choose a section below.')
                     .setColor(3447003)
                     .setTimestamp(new Date());
 
@@ -1271,6 +1286,41 @@ client.on('interactionCreate', async interaction => {
                 return interaction.reply({
                     content: await buildImpoundsText(interaction.user.id),
                     flags: MessageFlags.Ephemeral
+                });
+            }
+
+            if (interaction.customId.startsWith('shop_page:')) {
+                const [, section, pageRaw] = interaction.customId.split(':');
+                const page = Number(pageRaw) || 0;
+                const member = await interaction.guild.members.fetch(interaction.user.id);
+                const vehicles = await getAvailableVehiclesForMember(member, section);
+
+                if (!vehicles.length) {
+                    return interaction.update({
+                        content: 'No vehicles are available in that section.',
+                        embeds: [],
+                        components: [buildCategorySelect()]
+                    });
+                }
+
+                return interaction.update({
+                    content: '',
+                    embeds: [buildVehicleListEmbed(section, vehicles, page)],
+                    components: [buildVehicleSelect(section, vehicles, page), buildShopPageButtons(section, page, vehicles.length)]
+                });
+            }
+
+            if (interaction.customId === 'shop_back_categories') {
+                const embed = new EmbedBuilder()
+                    .setTitle('Vehicle Shop')
+                    .setDescription('Choose a section below.')
+                    .setColor(3447003)
+                    .setTimestamp(new Date());
+
+                return interaction.update({
+                    content: '',
+                    embeds: [embed],
+                    components: [buildCategorySelect()]
                 });
             }
 
@@ -1600,8 +1650,8 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.commandName === 'shop') {
             const embed = new EmbedBuilder()
-                .setTitle('🚘 Vehicle Shop')
-                .setDescription('Choose a category below.')
+                .setTitle('Vehicle Shop')
+                .setDescription('Choose a section below.')
                 .setColor(3447003)
                 .setTimestamp(new Date());
 
