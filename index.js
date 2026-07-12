@@ -562,7 +562,7 @@ async function buildBillsEmbed(discordId) {
         .setTimestamp(new Date());
 
     if (!bills.length) {
-        embed.setDescription('You have no outstanding parking bills.');
+        embed.setDescription('You have no outstanding infringements.');
         return embed;
     }
 
@@ -679,7 +679,7 @@ async function payParkingBill(discordId, billId) {
         };
     } catch (error) {
         await connection.rollback();
-        console.error('Pay parking bill error:', error);
+        console.error('Pay infringements error:', error);
         return { ok: false, message: 'The bill payment could not be completed.' };
     } finally {
         connection.release();
@@ -1314,10 +1314,10 @@ const commands = [
         .setDescription('Buy a licence')
         .addStringOption(o => o.setName('licence').setDescription('Licence code').setRequired(true)),
     new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
-    new SlashCommandBuilder().setName('bills').setDescription('View your outstanding parking bills'),
+    new SlashCommandBuilder().setName('bills').setDescription('View your outstanding infringements'),
     new SlashCommandBuilder()
         .setName('paybill')
-        .setDescription('Pay an outstanding parking bill')
+        .setDescription('Aay any outstanding infringements')
         .addIntegerOption(o => o.setName('bill_id').setDescription('Bill ID shown in /bills').setRequired(true)),
     new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
     new SlashCommandBuilder().setName('work').setDescription('Work for money'),
