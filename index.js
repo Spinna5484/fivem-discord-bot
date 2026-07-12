@@ -57,7 +57,10 @@ const COMMAND_CHANNELS = {
     licences: process.env.CHANNEL_PURCHASE,
     buylicence: process.env.CHANNEL_PURCHASE,
     addvehicle: process.env.CHANNEL_PURCHASE,
-    vehicleclasses: process.env.CHANNEL_PURCHASE
+    vehicleclasses: process.env.CHANNEL_PURCHASE,
+
+    bills: process.env.CHANNEL_BALANCE,
+    paybill: process.env.CHANNEL_BALANCE
 };
 
 const STRAIGHT_TO_AUCTION_ROLE_IDS = (process.env.STRAIGHT_TO_AUCTION_ROLE_IDS || '')
@@ -388,13 +391,14 @@ function buildEconomyHomeEmbed() {
             { name: 'Vehicle Shop', value: 'Buy cars, trucks, vans and more.', inline: true },
             { name: 'My Vehicles', value: 'View your owned vehicles.', inline: true },
             { name: 'Auctions', value: 'View active auctions.', inline: true },
-            { name: 'Impounds', value: 'View your impounded vehicles.', inline: true }
+            { name: 'Impounds', value: 'View your impounded vehicles.', inline: true },
+            { name: 'Bills', value: 'View and pay outstanding parking fines.', inline: true }
         )
         .setTimestamp(new Date());
 }
 
 function buildEconomyHomeButtons() {
-    return new ActionRowBuilder().addComponents(
+    const mainRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
             .setCustomId('economy_balance')
             .setLabel('Balance')
@@ -416,6 +420,16 @@ function buildEconomyHomeButtons() {
             .setLabel('Impounds')
             .setStyle(ButtonStyle.Secondary)
     );
+
+    const billsRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('economy_bills')
+            .setLabel('Bills')
+            .setEmoji('🧾')
+            .setStyle(ButtonStyle.Danger)
+    );
+
+    return [mainRow, billsRow];
 }
 
 async function buildMyVehiclesEmbed(discordId) {
@@ -484,6 +498,194 @@ async function buildImpoundsText(discordId) {
         `**${r.vehicle_model}** [${r.plate}] | Fee: **$${r.fee}** | Method: ${r.impound_method} | Reason: ${r.reason}`
     ).join('\n');
 }
+
+
+async function ensureParkingFinesTable() {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_parking_fines (
+                id INT NOT NULL AUTO_INCREMENT,
+                plate VARCHAR(20) NOT NULL,
+                owner_discord_id VARCHAR(32) NOT NULL,
+                meter_id VARCHAR(100) NOT NULL,
+                meter_x DOUBLE NOT NULL DEFAULT 0,
+                meter_y DOUBLE NOT NULL DEFAULT 0,
+                meter_z DOUBLE NOT NULL DEFAULT 0,
+                reason VARCHAR(255) NOT NULL,
+                amount INT NOT NULL,
+                paid_amount INT NOT NULL DEFAULT 0,
+                outstanding_amount INT NOT NULL DEFAULT 0,
+                status ENUM('paid', 'part_paid', 'unpaid', 'cancelled') NOT NULL DEFAULT 'unpaid',
+                officer_license VARCHAR(100) DEFAULT NULL,
+                officer_name VARCHAR(100) DEFAULT NULL,
+                issued_at BIGINT NOT NULL,
+                paid_at BIGINT DEFAULT NULL,
+                PRIMARY KEY (id),
+                KEY idx_parking_fines_plate (plate),
+                KEY idx_parking_fines_owner (owner_discord_id),
+                KEY idx_parking_fines_status (status)
+            )
+        `);
+    } catch (error) {
+        console.error('Parking fines schema ensure error:', error);
+    }
+}
+
+function formatBillDate(timestamp) {
+    const value = Number(timestamp || 0);
+    if (!value) return 'Unknown';
+
+    const milliseconds = value < 1000000000000 ? value * 1000 : value;
+    return `<t:${Math.floor(milliseconds / 1000)}:F>`;
+}
+
+async function getOutstandingBills(discordId) {
+    const [rows] = await pool.query(
+        `SELECT id, plate, reason, amount, paid_amount, outstanding_amount, status, officer_name, issued_at
+         FROM bot_parking_fines
+         WHERE owner_discord_id = ?
+           AND status IN ('unpaid', 'part_paid')
+           AND outstanding_amount > 0
+         ORDER BY issued_at DESC`,
+        [discordId]
+    );
+
+    return rows;
+}
+
+async function buildBillsEmbed(discordId) {
+    const bills = await getOutstandingBills(discordId);
+
+    const embed = new EmbedBuilder()
+        .setTitle('🧾 Outstanding Bills')
+        .setColor(bills.length ? 15548997 : 5763719)
+        .setTimestamp(new Date());
+
+    if (!bills.length) {
+        embed.setDescription('You have no outstanding parking bills.');
+        return embed;
+    }
+
+    const total = bills.reduce((sum, bill) => sum + Number(bill.outstanding_amount || 0), 0);
+
+    embed.setDescription(
+        `You have **${bills.length}** outstanding bill(s) totalling **$${total}**.\n` +
+        'Use `/paybill bill_id` or the **Pay Bill** buttons below.'
+    );
+
+    for (const bill of bills.slice(0, 20)) {
+        embed.addFields({
+            name: `Bill #${bill.id} • Plate ${bill.plate}`,
+            value:
+                `Reason: **${bill.reason}**\n` +
+                `Outstanding: **$${bill.outstanding_amount}**\n` +
+                `Issued by: **${bill.officer_name || 'Parking Enforcement'}**\n` +
+                `Issued: ${formatBillDate(bill.issued_at)}`,
+            inline: false
+        });
+    }
+
+    if (bills.length > 20) {
+        embed.setFooter({ text: `Showing the newest 20 of ${bills.length} bills.` });
+    }
+
+    return embed;
+}
+
+function buildBillsButtons(bills) {
+    return bills.slice(0, 5).map(bill =>
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`pay_parking_bill:${bill.id}`)
+                .setLabel(`Pay Bill #${bill.id} • $${bill.outstanding_amount}`)
+                .setStyle(ButtonStyle.Danger)
+        )
+    );
+}
+
+async function payParkingBill(discordId, billId) {
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        const [billRows] = await connection.query(
+            `SELECT *
+             FROM bot_parking_fines
+             WHERE id = ? AND owner_discord_id = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [billId, discordId]
+        );
+
+        if (!billRows.length) {
+            await connection.rollback();
+            return { ok: false, message: 'That bill was not found or does not belong to you.' };
+        }
+
+        const bill = billRows[0];
+        const outstanding = Number(bill.outstanding_amount || 0);
+
+        if (!['unpaid', 'part_paid'].includes(String(bill.status)) || outstanding <= 0) {
+            await connection.rollback();
+            return { ok: false, message: `Bill #${bill.id} is already paid or no longer active.` };
+        }
+
+        const [userRows] = await connection.query(
+            'SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1 FOR UPDATE',
+            [discordId]
+        );
+
+        if (!userRows.length) {
+            await connection.rollback();
+            return { ok: false, message: 'Your economy account could not be found.' };
+        }
+
+        const balance = Number(userRows[0].balance || 0);
+
+        if (balance < outstanding) {
+            await connection.rollback();
+            return {
+                ok: false,
+                message: `You need **$${outstanding}** to pay Bill #${bill.id}, but your balance is **$${balance}**.`
+            };
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+
+        await connection.query(
+            'UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?',
+            [outstanding, discordId]
+        );
+
+        await connection.query(
+            `UPDATE bot_parking_fines
+             SET paid_amount = paid_amount + ?,
+                 outstanding_amount = 0,
+                 status = 'paid',
+                 paid_at = ?
+             WHERE id = ?`,
+            [outstanding, now, bill.id]
+        );
+
+        await connection.commit();
+
+        return {
+            ok: true,
+            message:
+                `✅ Paid **Bill #${bill.id}** for plate **${bill.plate}**.\n` +
+                `Amount: **$${outstanding}**\n` +
+                `New balance: **$${balance - outstanding}**`
+        };
+    } catch (error) {
+        await connection.rollback();
+        console.error('Pay parking bill error:', error);
+        return { ok: false, message: 'The bill payment could not be completed.' };
+    } finally {
+        connection.release();
+    }
+}
+
 
 async function purchaseVehicleForUser(interaction, model) {
     const discordId = interaction.user.id;
@@ -1112,6 +1314,11 @@ const commands = [
         .setDescription('Buy a licence')
         .addStringOption(o => o.setName('licence').setDescription('Licence code').setRequired(true)),
     new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
+    new SlashCommandBuilder().setName('bills').setDescription('View your outstanding parking bills'),
+    new SlashCommandBuilder()
+        .setName('paybill')
+        .setDescription('Pay an outstanding parking bill')
+        .addIntegerOption(o => o.setName('bill_id').setDescription('Bill ID shown in /bills').setRequired(true)),
     new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
     new SlashCommandBuilder().setName('work').setDescription('Work for money'),
     new SlashCommandBuilder().setName('roleshop').setDescription('View roles'),
@@ -1170,6 +1377,7 @@ client.once('clientReady', async () => {
     await ensureAuctionColumns();
     await ensureVehicleShopColumns();
     await ensureLicenceColumns();
+    await ensureParkingFinesTable();
 
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
@@ -1289,6 +1497,34 @@ client.on('interactionCreate', async interaction => {
                 });
             }
 
+            if (interaction.customId === 'economy_bills') {
+                const bills = await getOutstandingBills(interaction.user.id);
+
+                return interaction.reply({
+                    embeds: [await buildBillsEmbed(interaction.user.id)],
+                    components: buildBillsButtons(bills),
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            if (interaction.customId.startsWith('pay_parking_bill:')) {
+                const billId = Number(interaction.customId.split(':')[1]);
+
+                if (!Number.isInteger(billId) || billId <= 0) {
+                    return interaction.reply({
+                        content: 'Invalid bill ID.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                const result = await payParkingBill(interaction.user.id, billId);
+
+                return interaction.reply({
+                    content: result.message,
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
             if (interaction.customId.startsWith('shop_page:')) {
                 const [, section, pageRaw] = interaction.customId.split(':');
                 const page = Number(pageRaw) || 0;
@@ -1371,7 +1607,7 @@ client.on('interactionCreate', async interaction => {
         if (interaction.commandName === 'economy') {
             return interaction.reply({
                 embeds: [buildEconomyHomeEmbed()],
-                components: [buildEconomyHomeButtons()],
+                components: buildEconomyHomeButtons(),
                 flags: MessageFlags.Ephemeral
             });
         }
@@ -1411,6 +1647,26 @@ client.on('interactionCreate', async interaction => {
 
             return interaction.reply({
                 content: `💰 Balance: $${freshBalance}`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'bills') {
+            const bills = await getOutstandingBills(discordId);
+
+            return interaction.reply({
+                embeds: [await buildBillsEmbed(discordId)],
+                components: buildBillsButtons(bills),
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'paybill') {
+            const billId = interaction.options.getInteger('bill_id');
+            const result = await payParkingBill(discordId, billId);
+
+            return interaction.reply({
+                content: result.message,
                 flags: MessageFlags.Ephemeral
             });
         }
