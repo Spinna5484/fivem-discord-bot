@@ -655,7 +655,7 @@ function buildBillsNavigation(view = 'outstanding', hasOutstanding = false) {
 }
 
 function buildBillsButtons(bills) {
-    return bills.slice(0, 5).map(bill =>
+    return bills.slice(0, 4).map(bill =>
         new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setCustomId(`pay_parking_bill:${bill.id}`)
@@ -768,7 +768,10 @@ async function payParkingBill(discordId, billId) {
             message:
                 `✅ Paid **Bill #${bill.id}** for plate **${bill.plate}**.\n` +
                 `Amount: **$${outstanding}**\n` +
-                `New balance: **$${balance - outstanding}**`
+                `New balance: **$${balance - outstanding}**`,
+            bill,
+            amountPaid: outstanding,
+            newBalance: balance - outstanding
         };
     } catch (error) {
         await connection.rollback();
@@ -2070,11 +2073,6 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-            return interaction.reply({
-                embeds: [buildBillReceiptEmbed(result.bill, result.amountPaid, result.newBalance)],
-                flags: MessageFlags.Ephemeral
-            });
-        }
 
         if (interaction.commandName === 'daily') {
             const now = Date.now();
