@@ -34,6 +34,11 @@ const pool = mysql.createPool({
 const DAILY_COOLDOWN = 86400000;
 const WORK_COOLDOWN = 3600000;
 
+const BILL_WARNING_HOURS = Number(process.env.BILL_WARNING_HOURS || 60);
+const BILL_WARRANT_HOURS = Number(process.env.BILL_WARRANT_HOURS || 72);
+const BILL_ESCALATION_WEBHOOK = process.env.BILLS_WEBHOOK || '';
+const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
+
 const COMMAND_CHANNELS = {
     auctions: process.env.CHANNEL_AUCTIONS,
     bid: process.env.CHANNEL_AUCTIONS,
@@ -41,6 +46,7 @@ const COMMAND_CHANNELS = {
     balance: process.env.CHANNEL_BALANCE,
     daily: process.env.CHANNEL_BALANCE,
     work: process.env.CHANNEL_BALANCE,
+    checkbills: process.env.CHANNEL_BILLS || process.env.CHANNEL_BALANCE,
 
     shop: process.env.CHANNEL_PURCHASE,
     buyvehicle: process.env.CHANNEL_PURCHASE,
@@ -59,8 +65,6 @@ const COMMAND_CHANNELS = {
     addvehicle: process.env.CHANNEL_PURCHASE,
     vehicleclasses: process.env.CHANNEL_PURCHASE,
 
-    bills: process.env.CHANNEL_BALANCE,
-    paybill: process.env.CHANNEL_BALANCE
 };
 
 const STRAIGHT_TO_AUCTION_ROLE_IDS = (process.env.STRAIGHT_TO_AUCTION_ROLE_IDS || '')
@@ -553,43 +557,101 @@ async function getOutstandingBills(discordId) {
     return rows;
 }
 
-async function buildBillsEmbed(discordId) {
-    const bills = await getOutstandingBills(discordId);
+async function buildBillsEmbed(discordId, view = 'outstanding') {
+    const isPaidView = view === 'paid';
+
+    const [rows] = await pool.query(
+        `SELECT id, plate, reason, amount, paid_amount, outstanding_amount, status, officer_name, issued_at, paid_at
+         FROM bot_parking_fines
+         WHERE owner_discord_id = ?
+           AND ${
+               isPaidView
+                   ? "status = 'paid'"
+                   : "status IN ('unpaid', 'part_paid') AND outstanding_amount > 0"
+           }
+         ORDER BY ${isPaidView ? 'paid_at' : 'issued_at'} DESC
+         LIMIT 20`,
+        [discordId]
+    );
 
     const embed = new EmbedBuilder()
-        .setTitle('🧾 Outstanding Bills')
-        .setColor(bills.length ? 15548997 : 5763719)
+        .setTitle(isPaidView ? '✅ Paid Bills' : '🧾 Outstanding Bills')
+        .setColor(isPaidView ? 5763719 : (rows.length ? 15548997 : 5763719))
         .setTimestamp(new Date());
 
-    if (!bills.length) {
-        embed.setDescription('You have no outstanding infringements.');
+    if (!rows.length) {
+        embed.setDescription(
+            isPaidView
+                ? 'You have no paid parking bills yet.'
+                : 'You have no outstanding parking bills.'
+        );
         return embed;
     }
 
-    const total = bills.reduce((sum, bill) => sum + Number(bill.outstanding_amount || 0), 0);
+    if (!isPaidView) {
+        const total = rows.reduce((sum, bill) => sum + Number(bill.outstanding_amount || 0), 0);
 
-    embed.setDescription(
-        `You have **${bills.length}** outstanding bill(s) totalling **$${total}**.\n` +
-        'Use `/paybill bill_id` or the **Pay Bill** buttons below.'
-    );
+        embed.setDescription(
+            `You have **${rows.length}** outstanding bill(s) totalling **$${total}**.
+` +
+            'Press the matching **Pay Bill** button below.'
+        );
+    } else {
+        embed.setDescription('Your most recent paid parking bills are shown below.');
+    }
 
-    for (const bill of bills.slice(0, 20)) {
+    for (const bill of rows) {
+        const amountText = isPaidView
+            ? `Paid: **$${bill.paid_amount || bill.amount}**`
+            : `Outstanding: **$${bill.outstanding_amount}**`;
+
+        const dateText = isPaidView
+            ? `Paid: ${formatBillDate(bill.paid_at)}`
+            : `Issued: ${formatBillDate(bill.issued_at)}`;
+
         embed.addFields({
-            name: `Bill #${bill.id} • Plate ${bill.plate}`,
+            name: `${isPaidView ? 'Receipt' : 'Bill'} #${bill.id} • Plate ${bill.plate}`,
             value:
-                `Reason: **${bill.reason}**\n` +
-                `Outstanding: **$${bill.outstanding_amount}**\n` +
-                `Issued by: **${bill.officer_name || 'Parking Enforcement'}**\n` +
-                `Issued: ${formatBillDate(bill.issued_at)}`,
+                `Reason: **${bill.reason}**
+` +
+                `${amountText}
+` +
+                `Issued by: **${bill.officer_name || 'Parking Enforcement'}**
+` +
+                `${dateText}`,
             inline: false
         });
     }
 
-    if (bills.length > 20) {
-        embed.setFooter({ text: `Showing the newest 20 of ${bills.length} bills.` });
-    }
-
     return embed;
+}
+
+function buildBillsNavigation(view = 'outstanding', hasOutstanding = false) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('bills_view_outstanding')
+            .setLabel('Outstanding')
+            .setEmoji('🧾')
+            .setStyle(view === 'outstanding' ? ButtonStyle.Danger : ButtonStyle.Secondary)
+            .setDisabled(view === 'outstanding'),
+        new ButtonBuilder()
+            .setCustomId('bills_view_paid')
+            .setLabel('Paid History')
+            .setEmoji('✅')
+            .setStyle(view === 'paid' ? ButtonStyle.Success : ButtonStyle.Secondary)
+            .setDisabled(view === 'paid'),
+        new ButtonBuilder()
+            .setCustomId('bills_pay_all')
+            .setLabel('Pay All Bills')
+            .setEmoji('💳')
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(view !== 'outstanding' || !hasOutstanding),
+        new ButtonBuilder()
+            .setCustomId('bills_refresh')
+            .setLabel('Refresh')
+            .setEmoji('🔄')
+            .setStyle(ButtonStyle.Primary)
+    );
 }
 
 function buildBillsButtons(bills) {
@@ -598,10 +660,37 @@ function buildBillsButtons(bills) {
             new ButtonBuilder()
                 .setCustomId(`pay_parking_bill:${bill.id}`)
                 .setLabel(`Pay Bill #${bill.id} • $${bill.outstanding_amount}`)
+                .setEmoji('💳')
                 .setStyle(ButtonStyle.Danger)
         )
     );
 }
+
+async function getBillsComponents(discordId, view = 'outstanding') {
+    if (view === 'paid') {
+        return [buildBillsNavigation('paid', false)];
+    }
+
+    const bills = await getOutstandingBills(discordId);
+    return [buildBillsNavigation('outstanding', bills.length > 0), ...buildBillsButtons(bills)];
+}
+
+function buildBillReceiptEmbed(bill, amountPaid, newBalance) {
+    return new EmbedBuilder()
+        .setTitle('🧾 Get a Life RP Receipt')
+        .setColor(5763719)
+        .addFields(
+            { name: 'Receipt', value: `#${bill.id}`, inline: true },
+            { name: 'Status', value: 'PAID ✅', inline: true },
+            { name: 'Plate', value: bill.plate || 'Unknown', inline: true },
+            { name: 'Reason', value: bill.reason || 'Parking fine', inline: false },
+            { name: 'Amount Paid', value: `$${amountPaid}`, inline: true },
+            { name: 'New Balance', value: `$${newBalance}`, inline: true },
+            { name: 'Paid', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+        )
+        .setTimestamp(new Date());
+}
+
 
 async function payParkingBill(discordId, billId) {
     const connection = await pool.getConnection();
@@ -663,7 +752,11 @@ async function payParkingBill(discordId, billId) {
              SET paid_amount = paid_amount + ?,
                  outstanding_amount = 0,
                  status = 'paid',
-                 paid_at = ?
+                 paid_at = ?,
+                 warrant_status = CASE
+                     WHEN warrant_status IN ('warning', 'pending') THEN 'cleared'
+                     ELSE warrant_status
+                 END
              WHERE id = ?`,
             [outstanding, now, bill.id]
         );
@@ -679,10 +772,293 @@ async function payParkingBill(discordId, billId) {
         };
     } catch (error) {
         await connection.rollback();
-        console.error('Pay infringements error:', error);
+        console.error('Pay parking bill error:', error);
         return { ok: false, message: 'The bill payment could not be completed.' };
     } finally {
         connection.release();
+    }
+}
+
+
+
+async function payAllParkingBills(discordId) {
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        const [bills] = await connection.query(
+            `SELECT *
+             FROM bot_parking_fines
+             WHERE owner_discord_id = ?
+               AND status IN ('unpaid', 'part_paid')
+               AND outstanding_amount > 0
+             ORDER BY issued_at ASC
+             FOR UPDATE`,
+            [discordId]
+        );
+
+        if (!bills.length) {
+            await connection.rollback();
+            return { ok: false, message: 'You have no outstanding bills.' };
+        }
+
+        const total = bills.reduce(
+            (sum, bill) => sum + Number(bill.outstanding_amount || 0),
+            0
+        );
+
+        const [userRows] = await connection.query(
+            'SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1 FOR UPDATE',
+            [discordId]
+        );
+
+        if (!userRows.length) {
+            await connection.rollback();
+            return { ok: false, message: 'Your economy account could not be found.' };
+        }
+
+        const balance = Number(userRows[0].balance || 0);
+
+        if (balance < total) {
+            await connection.rollback();
+            return {
+                ok: false,
+                message: `You need **$${total}** to pay all bills, but your balance is **$${balance}**.`
+            };
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        const ids = bills.map(bill => Number(bill.id));
+        const placeholders = ids.map(() => '?').join(',');
+
+        await connection.query(
+            'UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?',
+            [total, discordId]
+        );
+
+        await connection.query(
+            `UPDATE bot_parking_fines
+             SET paid_amount = amount,
+                 outstanding_amount = 0,
+                 status = 'paid',
+                 paid_at = ?,
+                 warrant_status = CASE
+                     WHEN warrant_status IN ('warning', 'pending') THEN 'cleared'
+                     ELSE warrant_status
+                 END
+             WHERE id IN (${placeholders})`,
+            [now, ...ids]
+        );
+
+        await connection.commit();
+
+        return {
+            ok: true,
+            bills,
+            totalPaid: total,
+            newBalance: balance - total
+        };
+    } catch (error) {
+        await connection.rollback();
+        console.error('Pay all parking bills error:', error);
+        return { ok: false, message: 'The bills could not be paid.' };
+    } finally {
+        connection.release();
+    }
+}
+
+function buildPayAllReceiptEmbed(result) {
+    const plates = [...new Set(result.bills.map(bill => bill.plate))];
+
+    return new EmbedBuilder()
+        .setTitle('🧾 Get a Life RP Receipt')
+        .setColor(5763719)
+        .setDescription(`Paid **${result.bills.length}** bill(s) in one payment.`)
+        .addFields(
+            { name: 'Status', value: 'PAID ✅', inline: true },
+            { name: 'Total Paid', value: `$${result.totalPaid}`, inline: true },
+            { name: 'New Balance', value: `$${result.newBalance}`, inline: true },
+            { name: 'Plates', value: plates.join(', ').slice(0, 1024) || 'Unknown', inline: false },
+            { name: 'Paid', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+        )
+        .setTimestamp(new Date());
+}
+
+async function sendBillsWebhook(title, description, color = 15548997) {
+    if (!BILL_ESCALATION_WEBHOOK) return;
+
+    try {
+        await fetch(BILL_ESCALATION_WEBHOOK, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: 'Get a Life RP Bills',
+                content: SHERIFF_ROLE_ID ? `<@&${SHERIFF_ROLE_ID}>` : undefined,
+                allowed_mentions: SHERIFF_ROLE_ID ? { roles: [SHERIFF_ROLE_ID] } : undefined,
+                embeds: [{
+                    title,
+                    description,
+                    color,
+                    timestamp: new Date().toISOString(),
+                    footer: { text: 'Get a Life RP • Bills Enforcement' }
+                }]
+            })
+        });
+    } catch (error) {
+        console.error('Bills webhook error:', error);
+    }
+}
+
+async function ensureBillEscalationColumns() {
+    const statements = [
+        `ALTER TABLE bot_parking_fines ADD COLUMN warning_sent_at BIGINT NULL`,
+        `ALTER TABLE bot_parking_fines ADD COLUMN warrant_status VARCHAR(30) NOT NULL DEFAULT 'none'`,
+        `ALTER TABLE bot_parking_fines ADD COLUMN warrant_sent_at BIGINT NULL`,
+        `ALTER TABLE bot_parking_fines ADD COLUMN warrant_reference VARCHAR(100) NULL`
+    ];
+
+    for (const sql of statements) {
+        await pool.query(sql).catch(() => {});
+    }
+}
+
+async function notifyUserOfFinalBillWarning(discordId, bills, hoursRemaining) {
+    const user = await client.users.fetch(discordId).catch(() => null);
+    if (!user) return;
+
+    const total = bills.reduce(
+        (sum, bill) => sum + Number(bill.outstanding_amount || 0),
+        0
+    );
+
+    await user.send({
+        embeds: [
+            new EmbedBuilder()
+                .setTitle('⚠️ Final Notice — Unpaid Bills')
+                .setColor(16753920)
+                .setDescription(
+                    `You have **${bills.length}** unpaid parking bill(s) totalling **$${total}**.\n\n` +
+                    `Pay them using \`/checkbills\` within approximately **${hoursRemaining} hours** ` +
+                    'to avoid the account being referred to the Sheriff for a warrant.'
+                )
+                .addFields(
+                    bills.slice(0, 10).map(bill => ({
+                        name: `Bill #${bill.id} • ${bill.plate}`,
+                        value: `${bill.reason}\nOutstanding: **$${bill.outstanding_amount}**`,
+                        inline: false
+                    }))
+                )
+                .setTimestamp(new Date())
+        ]
+    }).catch(() => {});
+}
+
+async function processOverdueBills() {
+    try {
+        const now = Math.floor(Date.now() / 1000);
+        const warningAge = BILL_WARNING_HOURS * 60 * 60;
+        const warrantAge = BILL_WARRANT_HOURS * 60 * 60;
+
+        const [owners] = await pool.query(
+            `SELECT DISTINCT owner_discord_id
+             FROM bot_parking_fines
+             WHERE status IN ('unpaid', 'part_paid')
+               AND outstanding_amount > 0`
+        );
+
+        for (const owner of owners) {
+            const discordId = String(owner.owner_discord_id);
+
+            const [bills] = await pool.query(
+                `SELECT *
+                 FROM bot_parking_fines
+                 WHERE owner_discord_id = ?
+                   AND status IN ('unpaid', 'part_paid')
+                   AND outstanding_amount > 0
+                 ORDER BY issued_at ASC`,
+                [discordId]
+            );
+
+            if (!bills.length) continue;
+
+            const oldestIssuedAt = Math.min(...bills.map(b => Number(b.issued_at || now)));
+            const age = now - oldestIssuedAt;
+            const warningBills = bills.filter(b => !b.warning_sent_at);
+
+            if (age >= warningAge && age < warrantAge && warningBills.length) {
+                const total = bills.reduce(
+                    (sum, bill) => sum + Number(bill.outstanding_amount || 0),
+                    0
+                );
+                const hoursRemaining = Math.max(1, Math.ceil((warrantAge - age) / 3600));
+
+                await notifyUserOfFinalBillWarning(discordId, bills, hoursRemaining);
+
+                await sendBillsWebhook(
+                    'Final Notice — Unpaid Bills',
+                    `User: <@${discordId}>\n` +
+                    `Bills: **${bills.length}**\n` +
+                    `Total Outstanding: **$${total}**\n` +
+                    `Warrant referral in approximately **${hoursRemaining} hours** if unpaid.`,
+                    16753920
+                );
+
+                await pool.query(
+                    `UPDATE bot_parking_fines
+                     SET warning_sent_at = ?, warrant_status = 'warning'
+                     WHERE owner_discord_id = ?
+                       AND status IN ('unpaid', 'part_paid')
+                       AND outstanding_amount > 0
+                       AND warning_sent_at IS NULL`,
+                    [now, discordId]
+                );
+            }
+
+            if (age >= warrantAge) {
+                const [pending] = await pool.query(
+                    `SELECT id
+                     FROM bot_parking_fines
+                     WHERE owner_discord_id = ?
+                       AND status IN ('unpaid', 'part_paid')
+                       AND outstanding_amount > 0
+                       AND warrant_status NOT IN ('pending', 'issued')
+                     LIMIT 1`,
+                    [discordId]
+                );
+
+                if (!pending.length) continue;
+
+                const total = bills.reduce(
+                    (sum, bill) => sum + Number(bill.outstanding_amount || 0),
+                    0
+                );
+                const plates = [...new Set(bills.map(b => b.plate))].join(', ');
+
+                await sendBillsWebhook(
+                    'Sheriff Referral — Warrant Pending',
+                    `${SHERIFF_ROLE_ID ? `<@&${SHERIFF_ROLE_ID}>\n` : ''}` +
+                    `User: <@${discordId}>\n` +
+                    `Bills: **${bills.length}**\n` +
+                    `Total Outstanding: **$${total}**\n` +
+                    `Plates: **${plates}**\n\n` +
+                    'The three-day payment deadline has expired. A Sonoran CAD warrant is pending creation.',
+                    15548997
+                );
+
+                await pool.query(
+                    `UPDATE bot_parking_fines
+                     SET warrant_status = 'pending', warrant_sent_at = ?
+                     WHERE owner_discord_id = ?
+                       AND status IN ('unpaid', 'part_paid')
+                       AND outstanding_amount > 0
+                       AND warrant_status NOT IN ('pending', 'issued')`,
+                    [now, discordId]
+                );
+            }
+        }
+    } catch (error) {
+        console.error('Overdue bills process error:', error);
     }
 }
 
@@ -1307,18 +1683,13 @@ async function announceNewAuctions() {
 }
 
 const commands = [
-    new SlashCommandBuilder().setName('economy').setDescription('Open the economy management menu'),
+    new SlashCommandBuilder().setName('checkbills').setDescription('View and pay your outstanding bills'),
     new SlashCommandBuilder().setName('licences').setDescription('View and buy licences'),
     new SlashCommandBuilder()
         .setName('buylicence')
         .setDescription('Buy a licence')
         .addStringOption(o => o.setName('licence').setDescription('Licence code').setRequired(true)),
     new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
-    new SlashCommandBuilder().setName('bills').setDescription('View your outstanding infringements'),
-    new SlashCommandBuilder()
-        .setName('paybill')
-        .setDescription('Aay any outstanding infringements')
-        .addIntegerOption(o => o.setName('bill_id').setDescription('Bill ID shown in /bills').setRequired(true)),
     new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
     new SlashCommandBuilder().setName('work').setDescription('Work for money'),
     new SlashCommandBuilder().setName('roleshop').setDescription('View roles'),
@@ -1378,6 +1749,7 @@ client.once('clientReady', async () => {
     await ensureVehicleShopColumns();
     await ensureLicenceColumns();
     await ensureParkingFinesTable();
+    await ensureBillEscalationColumns();
 
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
@@ -1398,12 +1770,14 @@ client.once('clientReady', async () => {
     await processImpoundsToAuctions();
     await settleAuctions();
     await announceNewAuctions();
+    await processOverdueBills();
 
     setInterval(syncGuildMemberRoles, 300000);
     setInterval(processRoleIncome, 30000);
     setInterval(processImpoundsToAuctions, 60000);
     setInterval(settleAuctions, 60000);
     setInterval(announceNewAuctions, 15000);
+    setInterval(processOverdueBills, 15 * 60 * 1000);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -1498,11 +1872,44 @@ client.on('interactionCreate', async interaction => {
             }
 
             if (interaction.customId === 'economy_bills') {
-                const bills = await getOutstandingBills(interaction.user.id);
-
                 return interaction.reply({
-                    embeds: [await buildBillsEmbed(interaction.user.id)],
-                    components: buildBillsButtons(bills),
+                    embeds: [await buildBillsEmbed(interaction.user.id, 'outstanding')],
+                    components: await getBillsComponents(interaction.user.id, 'outstanding'),
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            if (interaction.customId === 'bills_view_outstanding' || interaction.customId === 'bills_refresh') {
+                return interaction.update({
+                    embeds: [await buildBillsEmbed(interaction.user.id, 'outstanding')],
+                    components: await getBillsComponents(interaction.user.id, 'outstanding')
+                });
+            }
+
+            if (interaction.customId === 'bills_view_paid') {
+                return interaction.update({
+                    embeds: [await buildBillsEmbed(interaction.user.id, 'paid')],
+                    components: await getBillsComponents(interaction.user.id, 'paid')
+                });
+            }
+
+            if (interaction.customId === 'bills_pay_all') {
+                const result = await payAllParkingBills(interaction.user.id);
+
+                if (!result.ok) {
+                    return interaction.reply({
+                        content: result.message,
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                await interaction.update({
+                    embeds: [await buildBillsEmbed(interaction.user.id, 'outstanding')],
+                    components: await getBillsComponents(interaction.user.id, 'outstanding')
+                });
+
+                return interaction.followUp({
+                    embeds: [buildPayAllReceiptEmbed(result)],
                     flags: MessageFlags.Ephemeral
                 });
             }
@@ -1519,8 +1926,20 @@ client.on('interactionCreate', async interaction => {
 
                 const result = await payParkingBill(interaction.user.id, billId);
 
-                return interaction.reply({
-                    content: result.message,
+                if (!result.ok) {
+                    return interaction.reply({
+                        content: result.message,
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                await interaction.update({
+                    embeds: [await buildBillsEmbed(interaction.user.id, 'outstanding')],
+                    components: await getBillsComponents(interaction.user.id, 'outstanding')
+                });
+
+                return interaction.followUp({
+                    embeds: [buildBillReceiptEmbed(result.bill, result.amountPaid, result.newBalance)],
                     flags: MessageFlags.Ephemeral
                 });
             }
@@ -1604,10 +2023,10 @@ client.on('interactionCreate', async interaction => {
         const discordId = interaction.user.id;
         const user = await ensureUser(discordId);
 
-        if (interaction.commandName === 'economy') {
+        if (interaction.commandName === 'checkbills') {
             return interaction.reply({
-                embeds: [buildEconomyHomeEmbed()],
-                components: buildEconomyHomeButtons(),
+                embeds: [await buildBillsEmbed(discordId, 'outstanding')],
+                components: await getBillsComponents(discordId, 'outstanding'),
                 flags: MessageFlags.Ephemeral
             });
         }
@@ -1651,22 +2070,8 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        if (interaction.commandName === 'bills') {
-            const bills = await getOutstandingBills(discordId);
-
             return interaction.reply({
-                embeds: [await buildBillsEmbed(discordId)],
-                components: buildBillsButtons(bills),
-                flags: MessageFlags.Ephemeral
-            });
-        }
-
-        if (interaction.commandName === 'paybill') {
-            const billId = interaction.options.getInteger('bill_id');
-            const result = await payParkingBill(discordId, billId);
-
-            return interaction.reply({
-                content: result.message,
+                embeds: [buildBillReceiptEmbed(result.bill, result.amountPaid, result.newBalance)],
                 flags: MessageFlags.Ephemeral
             });
         }
