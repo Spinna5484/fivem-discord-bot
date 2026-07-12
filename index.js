@@ -1,5 +1,3 @@
-require('dotenv').config();
-
 const {
     Client,
     GatewayIntentBits,
@@ -37,6 +35,7 @@ const WORK_COOLDOWN = 3600000;
 const BILL_WARNING_HOURS = Number(process.env.BILL_WARNING_HOURS || 60);
 const BILL_WARRANT_HOURS = Number(process.env.BILL_WARRANT_HOURS || 72);
 const BILL_ESCALATION_WEBHOOK = process.env.BILLS_WEBHOOK || '';
+const INFRINGEMENT_WEBHOOK = process.env.INFRINGEMENT_WEBHOOK || '';
 const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
 
 const COMMAND_CHANNELS = {
@@ -692,6 +691,69 @@ function buildBillReceiptEmbed(bill, amountPaid, newBalance) {
 }
 
 
+
+function isCitationBill(bill) {
+    return ['general_citation', 'vehicle_citation'].includes(String(bill?.source_type || ''));
+}
+
+async function sendInfringementPaidWebhook(bills, totalPaid) {
+    if (!INFRINGEMENT_WEBHOOK) return;
+
+    const citationBills = (Array.isArray(bills) ? bills : [bills]).filter(isCitationBill);
+    if (!citationBills.length) return;
+
+    const fields = [];
+
+    for (const bill of citationBills.slice(0, 10)) {
+        fields.push({
+            name: `Citation Bill #${bill.id}`,
+            value:
+                `Type: **${bill.source_record_name || bill.source_type || 'Citation'}**\n` +
+                `Record ID: **${bill.source_record_id || 'Unknown'}**\n` +
+                `Civilian: **${[bill.civilian_first, bill.civilian_last].filter(Boolean).join(' ') || 'Unknown'}**\n` +
+                `Plate: **${bill.plate && bill.plate !== 'N/A' ? bill.plate : 'Not applicable'}**\n` +
+                `Reason: **${bill.reason || 'Citation'}**\n` +
+                `Amount Paid: **$${Number(bill.outstanding_amount || bill.amount || 0)}**`,
+            inline: false
+        });
+    }
+
+    try {
+        await fetch(INFRINGEMENT_WEBHOOK, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: 'Get a Life RP Infringements',
+                embeds: [{
+                    title: citationBills.length > 1 ? '✅ Citations Paid' : '✅ Citation Paid',
+                    description:
+                        citationBills.length > 1
+                            ? `**${citationBills.length}** citation bills were paid in one transaction.`
+                            : 'A Sonoran CAD citation bill has been paid.',
+                    color: 5763719,
+                    fields: [
+                        ...fields,
+                        {
+                            name: 'Total Citation Amount Paid',
+                            value: `$${Number(totalPaid || 0)}`,
+                            inline: true
+                        },
+                        {
+                            name: 'Status',
+                            value: 'PAID',
+                            inline: true
+                        }
+                    ],
+                    footer: { text: 'Get a Life RP • Infringement Management' },
+                    timestamp: new Date().toISOString()
+                }]
+            })
+        });
+    } catch (error) {
+        console.error('Infringement paid webhook error:', error);
+    }
+}
+
 async function payParkingBill(discordId, billId) {
     const connection = await pool.getConnection();
 
@@ -762,6 +824,8 @@ async function payParkingBill(discordId, billId) {
         );
 
         await connection.commit();
+
+        await sendInfringementPaidWebhook(bill, outstanding);
 
         return {
             ok: true,
@@ -855,6 +919,12 @@ async function payAllParkingBills(discordId) {
         );
 
         await connection.commit();
+
+        const citationTotal = bills
+            .filter(isCitationBill)
+            .reduce((sum, bill) => sum + Number(bill.outstanding_amount || bill.amount || 0), 0);
+
+        await sendInfringementPaidWebhook(bills, citationTotal);
 
         return {
             ok: true,
