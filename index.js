@@ -38,6 +38,28 @@ const BILL_ESCALATION_WEBHOOK = process.env.BILLS_WEBHOOK || '';
 const INFRINGEMENT_WEBHOOK = process.env.INFRINGEMENT_WEBHOOK || '';
 const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
 
+// Discord role(s) allowed to open and use the vehicle shop.
+// Example environment variable:
+// DRIVER_LICENCE_ROLE_IDS=123456789012345678
+const DRIVER_LICENCE_ROLE_IDS = (process.env.DRIVER_LICENCE_ROLE_IDS || process.env.DRIVER_LICENCE_ROLE_ID || '')
+    .split(',')
+    .map(v => v.trim())
+    .filter(Boolean);
+
+function memberHasDriversLicence(member) {
+    if (!member || !member.roles || !member.roles.cache) return false;
+    if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+    if (!DRIVER_LICENCE_ROLE_IDS.length) return false;
+    return DRIVER_LICENCE_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
+}
+
+function driversLicenceDeniedReply() {
+    if (!DRIVER_LICENCE_ROLE_IDS.length) {
+        return 'The vehicle shop is not configured. Staff must set DRIVER_LICENCE_ROLE_IDS to the Discord driver licence role ID.';
+    }
+    return 'You need the **Driver Licence** role in Discord before you can access the vehicle shop.';
+}
+
 const COMMAND_CHANNELS = {
     auctions: process.env.CHANNEL_AUCTIONS,
     bid: process.env.CHANNEL_AUCTIONS,
@@ -261,7 +283,7 @@ async function getAvailableVehiclesForMember(member, section = null) {
     const sectionData = section ? getCategoryData(section) : null;
 
     return vehicles
-        .filter(v => !v.required_role_id || member.roles.cache.has(v.required_role_id))
+        // Old Low / Middle / High class role restrictions are intentionally ignored.
         .filter(v => {
             if (!sectionData) return true;
 
@@ -1151,8 +1173,8 @@ async function purchaseVehicleForUser(interaction, model) {
 
     const vehicle = vehicleRows[0];
 
-    if (vehicle.required_role_id && !member.roles.cache.has(vehicle.required_role_id)) {
-        return interaction.reply({ content: 'You do not have the required role for that vehicle.', flags: MessageFlags.Ephemeral });
+    if (!memberHasDriversLicence(member)) {
+        return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
     }
 
     if (vehicle.required_licence) {
@@ -1863,6 +1885,11 @@ client.on('interactionCreate', async interaction => {
             if (interaction.customId === 'shop_category_select') {
                 const category = interaction.values[0];
                 const member = await interaction.guild.members.fetch(interaction.user.id);
+
+                if (!memberHasDriversLicence(member)) {
+                    return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
+                }
+
                 const vehicles = await getAvailableVehiclesForMember(member, category);
 
                 if (!vehicles.length) {
@@ -1910,6 +1937,12 @@ client.on('interactionCreate', async interaction => {
             }
 
             if (interaction.customId === 'economy_shop') {
+                const member = await interaction.guild.members.fetch(interaction.user.id);
+
+                if (!memberHasDriversLicence(member)) {
+                    return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
+                }
+
                 const embed = new EmbedBuilder()
                     .setTitle('Vehicle Shop')
                     .setDescription('Choose a section below.')
@@ -2338,7 +2371,7 @@ client.on('interactionCreate', async interaction => {
             const label = interaction.options.getString('label').trim();
             const price = interaction.options.getInteger('price');
             const section = interaction.options.getString('section');
-            const roleId = interaction.options.getString('roleid');
+            interaction.options.getString('roleid'); // Legacy option ignored.
 
             if (!model || !label || !price || price <= 0) {
                 return interaction.reply({
@@ -2362,7 +2395,7 @@ client.on('interactionCreate', async interaction => {
                     category = VALUES(category),
                     vehicle_class = VALUES(vehicle_class),
                     required_licence = VALUES(required_licence)`,
-                [model, label, price, roleId || null, category, vehicleClass, requiredLicence]
+                [model, label, price, null, category, vehicleClass, requiredLicence]
             );
 
             return interaction.reply({
@@ -2378,6 +2411,12 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (interaction.commandName === 'shop') {
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+
+            if (!memberHasDriversLicence(member)) {
+                return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
+            }
+
             const embed = new EmbedBuilder()
                 .setTitle('Vehicle Shop')
                 .setDescription('Choose a section below.')
