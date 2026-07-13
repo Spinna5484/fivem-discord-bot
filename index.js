@@ -45,19 +45,47 @@ const DRIVER_LICENCE_ROLE_IDS = (process.env.DRIVER_LICENCE_ROLE_IDS || process.
     .split(',')
     .map(v => v.trim())
     .filter(Boolean);
-console.log('Driver licence role configured:', DRIVER_LICENCE_ROLE_IDS.length > 0);
-console.log('Driver licence role count:', DRIVER_LICENCE_ROLE_IDS.length);
+
+const DRIVER_LICENCE_ROLE_NAMES = [
+    'driver licence',
+    'drivers licence',
+    "driver's licence",
+    'driver license',
+    'drivers license',
+    "driver's license"
+];
+
+function normaliseDiscordRoleName(name) {
+    return String(name || '')
+        .toLowerCase()
+        .replace(/[’']/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
 
 function memberHasDriversLicence(member) {
     if (!member || !member.roles || !member.roles.cache) return false;
-    if (!DRIVER_LICENCE_ROLE_IDS.length) return false;
-    return DRIVER_LICENCE_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
+
+    // First use the configured Railway role ID(s), when Railway exposes them.
+    if (
+        DRIVER_LICENCE_ROLE_IDS.length &&
+        DRIVER_LICENCE_ROLE_IDS.some(roleId => member.roles.cache.has(roleId))
+    ) {
+        return true;
+    }
+
+    // Fallback: detect the Discord role by name.
+    // This avoids Railway environment-variable issues.
+    const allowedNames = new Set(
+        DRIVER_LICENCE_ROLE_NAMES.map(normaliseDiscordRoleName)
+    );
+
+    return member.roles.cache.some(role =>
+        allowedNames.has(normaliseDiscordRoleName(role.name))
+    );
 }
 
 function driversLicenceDeniedReply() {
-    if (!DRIVER_LICENCE_ROLE_IDS.length) {
-        return 'The vehicle shop is not configured. Staff must set DRIVER_LICENCE_ROLE_IDS to the Discord driver licence role ID.';
-    }
     return 'You need the **Driver Licence** role in Discord before you can access the vehicle shop.';
 }
 
@@ -1840,6 +1868,11 @@ const commands = [
 
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
+    console.log(
+        `Driver licence access: ${DRIVER_LICENCE_ROLE_IDS.length
+            ? `${DRIVER_LICENCE_ROLE_IDS.length} configured role ID(s)`
+            : 'role-name fallback enabled (Driver Licence)'}`
+    );
 
     await ensureAuctionColumns();
     await ensureVehicleShopColumns();
