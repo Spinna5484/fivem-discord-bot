@@ -1920,10 +1920,6 @@ client.on('interactionCreate', async interaction => {
                 const category = interaction.values[0];
                 const member = await interaction.guild.members.fetch(interaction.user.id);
 
-                if (!memberHasDriversLicence(member)) {
-                    return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
-                }
-
                 const vehicles = await getAvailableVehiclesForMember(member, category);
 
                 if (!vehicles.length) {
@@ -1972,10 +1968,6 @@ client.on('interactionCreate', async interaction => {
 
             if (interaction.customId === 'economy_shop') {
                 const member = await interaction.guild.members.fetch(interaction.user.id);
-
-                if (!memberHasDriversLicence(member)) {
-                    return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
-                }
 
                 const embed = new EmbedBuilder()
                     .setTitle('Vehicle Shop')
@@ -2446,10 +2438,6 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.commandName === 'shop') {
             const member = await interaction.guild.members.fetch(interaction.user.id);
-
-            if (!memberHasDriversLicence(member)) {
-                return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
-            }
 
             const embed = new EmbedBuilder()
                 .setTitle('Vehicle Shop')
