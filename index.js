@@ -45,6 +45,8 @@ const DRIVER_LICENCE_ROLE_IDS = (process.env.DRIVER_LICENCE_ROLE_IDS || process.
     .split(',')
     .map(v => v.trim())
     .filter(Boolean);
+console.log('Driver licence role configured:', DRIVER_LICENCE_ROLE_IDS.length > 0);
+console.log('Driver licence role count:', DRIVER_LICENCE_ROLE_IDS.length);
 
 function memberHasDriversLicence(member) {
     if (!member || !member.roles || !member.roles.cache) return false;
