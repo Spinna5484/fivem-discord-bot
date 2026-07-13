@@ -37,6 +37,7 @@ const BILL_WARRANT_HOURS = Number(process.env.BILL_WARRANT_HOURS || 72);
 const BILL_ESCALATION_WEBHOOK = process.env.BILLS_WEBHOOK || '';
 const INFRINGEMENT_WEBHOOK = process.env.INFRINGEMENT_WEBHOOK || '';
 const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
+const DRIVER_LICENCE_PRICE = Number(process.env.DRIVER_LICENCE_PRICE || 2500);
 
 // Discord role(s) allowed to open and use the vehicle shop.
 // Example environment variable:
@@ -87,6 +88,24 @@ function memberHasDriversLicence(member) {
 
 function driversLicenceDeniedReply() {
     return 'You need the **Driver Licence** role in Discord before you can access the vehicle shop.';
+}
+
+
+function getDriversLicenceDiscordRole(guild) {
+    if (!guild || !guild.roles || !guild.roles.cache) return null;
+
+    for (const roleId of DRIVER_LICENCE_ROLE_IDS) {
+        const role = guild.roles.cache.get(roleId);
+        if (role) return role;
+    }
+
+    const allowedNames = new Set(
+        DRIVER_LICENCE_ROLE_NAMES.map(normaliseDiscordRoleName)
+    );
+
+    return guild.roles.cache.find(role =>
+        allowedNames.has(normaliseDiscordRoleName(role.name))
+    ) || null;
 }
 
 const COMMAND_CHANNELS = {
@@ -208,6 +227,7 @@ async function ensureVehicleShopColumns() {
 
 
 const LICENCE_SHOP = {
+    driver: { label: 'Driver Licence', price: DRIVER_LICENCE_PRICE, description: 'Required before purchasing road vehicles from the vehicle shop.' },
     cdl: { label: 'Commercial Driver License (CDL)', price: 10000, description: 'Required for heavy trucks and trailer vehicles.' },
     taxi: { label: 'Taxi Driver Permit', price: 2500, description: 'Required for taxi vehicles and taxi work.' },
     bus: { label: 'Passenger Endorsement', price: 5000, description: 'Required for bus and coach vehicles.' },
@@ -285,25 +305,118 @@ async function buyLicenceForUser(interaction, licence) {
         return interaction.reply({ content: 'That licence does not exist.', flags: MessageFlags.Ephemeral });
     }
 
+    const member = await interaction.guild.members.fetch(discordId);
+
+    if (licence === 'driver' && memberHasDriversLicence(member)) {
+        return interaction.reply({
+            content: 'You already have the **Driver Licence** Discord role.',
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
     const already = await hasLicence(discordId, licence);
     if (already) {
+        // Repair the Discord role if the database says they own it but the role is missing.
+        if (licence === 'driver') {
+            const discordRole = getDriversLicenceDiscordRole(interaction.guild);
+
+            if (!discordRole) {
+                return interaction.reply({
+                    content: 'Your Driver Licence is owned, but the Discord role could not be found. Staff must configure or create the **Driver Licence** role.',
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            try {
+                await member.roles.add(discordRole);
+                return interaction.reply({
+                    content: 'Your **Driver Licence** Discord role has been restored.',
+                    flags: MessageFlags.Ephemeral
+                });
+            } catch (error) {
+                console.error('Driver Licence role restore error:', error);
+                return interaction.reply({
+                    content: 'You own the Driver Licence, but I could not add the Discord role. Put the Economy Bot role above the Driver Licence role and give it **Manage Roles**.',
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+        }
+
         return interaction.reply({ content: `You already have **${data.label}**.`, flags: MessageFlags.Ephemeral });
     }
 
     const user = await ensureUser(discordId);
     if (Number(user.balance) < Number(data.price)) {
-        return interaction.reply({ content: `You need $${data.price} but only have $${user.balance}.`, flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+            content: `You need $${data.price} but only have $${user.balance}.`,
+            flags: MessageFlags.Ephemeral
+        });
     }
 
-    await pool.query('UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?', [data.price, discordId]);
-    await pool.query(
-        `INSERT INTO bot_job_licences (discord_id, licence, active, created_at)
-         VALUES (?, ?, 1, ?)
-         ON DUPLICATE KEY UPDATE active = 1, created_at = VALUES(created_at)`,
-        [discordId, licence, Math.floor(Date.now() / 1000)]
-    );
+    let discordRole = null;
 
-    return interaction.reply({ content: `Bought **${data.label}** for **$${data.price}**.`, flags: MessageFlags.Ephemeral });
+    if (licence === 'driver') {
+        discordRole = getDriversLicenceDiscordRole(interaction.guild);
+
+        if (!discordRole) {
+            return interaction.reply({
+                content: 'The **Driver Licence** Discord role could not be found. Staff must configure DRIVER_LICENCE_ROLE_IDS or create a role named Driver Licence.',
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (!discordRole.editable) {
+            return interaction.reply({
+                content: 'I cannot assign the **Driver Licence** role. Put the Economy Bot role above it and give the bot **Manage Roles**.',
+                flags: MessageFlags.Ephemeral
+            });
+        }
+    }
+
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        await connection.query(
+            'UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?',
+            [data.price, discordId]
+        );
+
+        await connection.query(
+            `INSERT INTO bot_job_licences (discord_id, licence, active, created_at)
+             VALUES (?, ?, 1, ?)
+             ON DUPLICATE KEY UPDATE active = 1, created_at = VALUES(created_at)`,
+            [discordId, licence, Math.floor(Date.now() / 1000)]
+        );
+
+        if (licence === 'driver') {
+            await member.roles.add(discordRole);
+        }
+
+        await connection.commit();
+
+        return interaction.reply({
+            content:
+                licence === 'driver'
+                    ? `Bought **${data.label}** for **$${data.price}**. The Discord role has been added.`
+                    : `Bought **${data.label}** for **$${data.price}**.`,
+            flags: MessageFlags.Ephemeral
+        });
+    } catch (error) {
+        await connection.rollback();
+        console.error('Buy licence error:', error);
+
+        return interaction.reply({
+            content:
+                licence === 'driver'
+                    ? 'The Driver Licence purchase failed. Check that the Economy Bot has **Manage Roles** and is above the Driver Licence role.'
+                    : 'The licence purchase could not be completed.',
+            flags: MessageFlags.Ephemeral
+        });
+    } finally {
+        connection.release();
+    }
 }
 
 
