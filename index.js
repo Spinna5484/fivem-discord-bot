@@ -48,7 +48,6 @@ const DRIVER_LICENCE_ROLE_IDS = (process.env.DRIVER_LICENCE_ROLE_IDS || process.
 
 function memberHasDriversLicence(member) {
     if (!member || !member.roles || !member.roles.cache) return false;
-    if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
     if (!DRIVER_LICENCE_ROLE_IDS.length) return false;
     return DRIVER_LICENCE_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
 }
