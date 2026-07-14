@@ -228,6 +228,7 @@ async function ensureVehicleShopColumns() {
 
 const LICENCE_SHOP = {
     driver: { label: 'Driver Licence', price: DRIVER_LICENCE_PRICE, description: 'Required before purchasing road vehicles from the vehicle shop.' },
+    firearm: { label: 'Firearm Licence', price: Number(process.env.FIREARM_LICENCE_PRICE || 7500), description: 'Required before purchasing civilian firearms and ammunition from Ammu-Nation.' },
     cdl: { label: 'Commercial Driver License (CDL)', price: 10000, description: 'Required for heavy trucks and trailer vehicles.' },
     taxi: { label: 'Taxi Driver Permit', price: 2500, description: 'Required for taxi vehicles and taxi work.' },
     bus: { label: 'Passenger Endorsement', price: 5000, description: 'Required for bus and coach vehicles.' },
