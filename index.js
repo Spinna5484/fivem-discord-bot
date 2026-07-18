@@ -39,9 +39,6 @@ const INFRINGEMENT_WEBHOOK = process.env.INFRINGEMENT_WEBHOOK || '';
 const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
 const DRIVER_LICENCE_PRICE = Number(process.env.DRIVER_LICENCE_PRICE || 2500);
 
-const SONORAN_COMMUNITY_ID = process.env.SONORAN_COMMUNITY_ID || '';
-const SONORAN_API_KEY = process.env.SONORAN_API_KEY || '';
-const SONORAN_NEW_RECORD_URL = 'https://api.sonorancad.com/general/new_record';
 
 const CAD_LICENCE_CONFIG = {
     driver: {
@@ -71,13 +68,6 @@ const CAD_LICENCE_CONFIG = {
     }
 };
 
-const SONORAN_LICENCE_TEMPLATE_ID = 4;
-const SONORAN_LICENCE_FIELDS = {
-    dmvStatus: '252c4250da9421cbd',
-    status: '878766af4964853a7',
-    type: '7eddab31daf4a0182',
-    expiration: '_54iz1scv7'
-};
 
 // Discord role(s) allowed to open and use the vehicle shop.
 // Example environment variable:
@@ -275,22 +265,22 @@ const LICENCE_SHOP = {
     motorcycle: {
         label: 'Motorcycle Licence',
         price: Number(process.env.MOTORCYCLE_LICENCE_PRICE || 5000),
-        description: 'Creates a pending Motorcycle licence for a selected CAD character.'
+        description: 'Creates a pending Motorcycle licence for a selected character.'
     },
     boat: {
         label: 'Boat Licence',
         price: Number(process.env.BOAT_LICENCE_PRICE || 7500),
-        description: 'Creates a pending Boat licence for a selected CAD character.'
+        description: 'Creates a pending Boat licence for a selected character.'
     },
     pilot: {
         label: 'Pilot Licence',
         price: Number(process.env.PILOT_LICENCE_PRICE || 15000),
-        description: 'Creates a pending Pilot licence for a selected CAD character.'
+        description: 'Creates a pending Pilot licence for a selected character.'
     },
     cdl: {
         label: 'Commercial Driver License (CDL)',
         price: Number(process.env.CDL_LICENCE_PRICE || 10000),
-        description: 'Required for heavy trucks and creates a pending CDL record in CAD.'
+        description: 'Required for heavy trucks and creates a pending CDL licence for a selected character.'
     },
     firearm: {
         label: 'Firearm Licence',
@@ -339,20 +329,14 @@ async function ensureLicenceColumns() {
             )
         `).catch(() => {});
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS bot_character_licences (
+            CREATE TABLE IF NOT EXISTS galrp_character_licenses (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                discord_id VARCHAR(50) NOT NULL,
                 character_id VARCHAR(100) NOT NULL,
-                licence VARCHAR(100) NOT NULL,
-                cad_type VARCHAR(50) NOT NULL,
-                cad_record_id VARCHAR(100) NULL,
-                issued_at DATE NOT NULL,
-                expires_at DATE NOT NULL,
                 status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
-                created_at BIGINT NOT NULL,
-                UNIQUE KEY uniq_character_licence (character_id, licence),
-                KEY idx_character_licence_discord (discord_id),
-                KEY idx_character_licence_character (character_id)
+                type VARCHAR(30) NOT NULL,
+                expiration DATE NOT NULL,
+                UNIQUE KEY unique_character_license (character_id, type),
+                KEY idx_character_id (character_id)
             )
         `).catch(() => {});
     } catch (error) {
@@ -498,123 +482,10 @@ async function showCadCharacterSelection(interaction, licence, purchasedNow = fa
     return interaction.reply({
         content:
             `${purchasedNow ? `✅ Bought **${data.label}**. ` : `You already own **${data.label}**. `}` +
-            'Choose the character that should receive the pending Sonoran CAD licence.',
+            'Choose the character that should receive the pending licence.',
         components: [buildCadCharacterSelect(licence, characters)],
         flags: MessageFlags.Ephemeral
     });
-}
-
-function normaliseCadSex(value) {
-    const sex = String(value || '').trim().toUpperCase();
-    if (sex.startsWith('F')) return 'F';
-    return 'M';
-}
-
-function normaliseCadHair(value) {
-    const hair = String(value || '').trim().toUpperCase();
-    if (hair === 'GRAY') return 'GREY';
-    return hair;
-}
-
-async function createSonoranCadLicence(character, licence) {
-    const config = CAD_LICENCE_CONFIG[licence];
-
-    if (!config) {
-        return { ok: false, message: 'That licence is not configured for Sonoran CAD.' };
-    }
-
-    if (!SONORAN_COMMUNITY_ID || !SONORAN_API_KEY) {
-        return {
-            ok: false,
-            message: 'SONORAN_COMMUNITY_ID or SONORAN_API_KEY is missing from the bot environment variables.'
-        };
-    }
-
-    const issuedAt = new Date();
-    const expiresAt = addYearsSafe(issuedAt, config.expiryYears);
-
-    const replaceValues = {
-        [SONORAN_LICENCE_FIELDS.dmvStatus]: '0',
-        [SONORAN_LICENCE_FIELDS.status]: 'PENDING',
-        [SONORAN_LICENCE_FIELDS.type]: config.cadType,
-        [SONORAN_LICENCE_FIELDS.expiration]: formatCadDate(expiresAt),
-
-        first: String(character.first_name || ''),
-        last: String(character.last_name || ''),
-        mi: String(character.middle_name || ''),
-        dob: character.date_of_birth ? formatCadDate(new Date(`${character.date_of_birth}T00:00:00`)) : '',
-        sex: normaliseCadSex(character.sex),
-        aka: String(character.alias_name || ''),
-        residence: String(character.residence || ''),
-        zip: String(character.zip_code || ''),
-        occupation: String(character.occupation || ''),
-        height: String(character.height || ''),
-        weight: String(character.weight || ''),
-        skin: String(character.skin_tone || '').toUpperCase(),
-        hair: normaliseCadHair(character.hair_color),
-        eyes: String(character.eye_color || '').toUpperCase(),
-        emergencyContact: String(character.emergency_contact || ''),
-        emergencyRelationship: String(character.emergency_relationship || ''),
-        emergencyContactNumber: String(character.phone_number || '')
-    };
-
-    const response = await fetch(SONORAN_NEW_RECORD_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            id: SONORAN_COMMUNITY_ID,
-            key: SONORAN_API_KEY,
-            type: 'NEW_RECORD',
-            data: [{
-                user: character.owner_license,
-                useDictionary: true,
-                recordTypeId: SONORAN_LICENCE_TEMPLATE_ID,
-                replaceValues,
-                record: null
-            }]
-        })
-    });
-
-    const responseText = await response.text();
-    let responseData = null;
-
-    try {
-        responseData = JSON.parse(responseText);
-    } catch (_) {}
-
-    if (!response.ok) {
-        return {
-            ok: false,
-            message: `Sonoran CAD rejected the licence (${response.status}): ${responseText.slice(0, 500)}`
-        };
-    }
-
-    const errorText = String(responseText || '').toUpperCase();
-    if (
-        errorText.includes('INVALID ') ||
-        errorText.includes('ERROR') ||
-        errorText.includes('NOT ENABLED')
-    ) {
-        return {
-            ok: false,
-            message: `Sonoran CAD did not create the licence: ${responseText.slice(0, 500)}`
-        };
-    }
-
-    const recordId =
-        responseData?.id ??
-        responseData?.recordId ??
-        responseData?.record?.id ??
-        responseData?.[0]?.id ??
-        null;
-
-    return {
-        ok: true,
-        recordId: recordId ? String(recordId) : null,
-        issuedAt,
-        expiresAt,
-        raw: responseText
-    };
 }
 
 async function assignCadLicenceToCharacter(interaction, licence, characterId) {
@@ -640,24 +511,8 @@ async function assignCadLicenceToCharacter(interaction, licence, characterId) {
     const [characters] = await pool.query(
         `SELECT DISTINCT
             c.character_id,
-            c.owner_license,
             c.first_name,
-            c.last_name,
-            c.middle_name,
-            DATE_FORMAT(c.date_of_birth, '%Y-%m-%d') AS date_of_birth,
-            c.sex,
-            c.residence,
-            c.zip_code,
-            c.occupation,
-            c.height,
-            c.weight,
-            c.skin_tone,
-            c.hair_color,
-            c.eye_color,
-            c.alias_name,
-            c.emergency_contact,
-            c.emergency_relationship,
-            c.phone_number
+            c.last_name
          FROM galrp_characters c
          LEFT JOIN bot_links b ON b.license = c.owner_license
          WHERE c.character_id = ?
@@ -677,64 +532,59 @@ async function assignCadLicenceToCharacter(interaction, licence, characterId) {
     const character = characters[0];
 
     const [existing] = await pool.query(
-        `SELECT id, expires_at, status
-         FROM bot_character_licences
-         WHERE character_id = ? AND licence = ?
+        `SELECT id, status, type, DATE_FORMAT(expiration, '%Y-%m-%d') AS expiration
+         FROM galrp_character_licenses
+         WHERE character_id = ? AND type = ?
          LIMIT 1`,
-        [character.character_id, licence]
+        [character.character_id, cadConfig.cadType]
     );
 
     if (existing.length) {
         return interaction.reply({
             content:
                 `**${character.first_name} ${character.last_name}** already has the ` +
-                `**${licenceData.label}** assignment. Status: **${existing[0].status}**, ` +
-                `expires **${existing[0].expires_at}**.`,
+                `**${licenceData.label}**.\n` +
+                `Status: **${existing[0].status}**\n` +
+                `Expiration: **${existing[0].expiration}**`,
             flags: MessageFlags.Ephemeral
         });
     }
 
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    let cadResult;
     try {
-        cadResult = await createSonoranCadLicence(character, licence);
-    } catch (error) {
-        console.error('Sonoran CAD licence creation error:', error);
-        cadResult = { ok: false, message: error.message || 'Unknown Sonoran CAD error.' };
-    }
+        await pool.query(
+            `INSERT INTO galrp_character_licenses
+                (character_id, status, type, expiration)
+             VALUES (?, 'PENDING', ?, DATE_ADD(CURDATE(), INTERVAL ? YEAR))`,
+            [character.character_id, cadConfig.cadType, cadConfig.expiryYears]
+        );
 
-    if (!cadResult.ok) {
-        return interaction.editReply({
+        return interaction.reply({
             content:
-                `Your **${licenceData.label}** entitlement is still owned, but the CAD record was not created.\n` +
-                `${cadResult.message}\n\nYou can select this licence again and retry for free.`
+                `✅ **${licenceData.label}** was assigned to ` +
+                `**${character.first_name} ${character.last_name}**.\n` +
+                `Status: **PENDING**\n` +
+                `Type: **${cadConfig.cadType}**\n` +
+                `Expiration: **2 years from today**\n\n` +
+                'Sonoran Database Sync will import the licence into CAD.',
+            flags: MessageFlags.Ephemeral
+        });
+    } catch (error) {
+        if (error && error.code === 'ER_DUP_ENTRY') {
+            return interaction.reply({
+                content: `That character already has a **${licenceData.label}**.`,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        console.error('Character licence SQL sync error:', error);
+
+        return interaction.reply({
+            content:
+                `Your **${licenceData.label}** entitlement is still owned, but the licence ` +
+                'could not be written to the Sonoran sync table. You can select it again and retry for free.',
+            flags: MessageFlags.Ephemeral
         });
     }
-
-    await pool.query(
-        `INSERT INTO bot_character_licences
-            (discord_id, character_id, licence, cad_type, cad_record_id, issued_at, expires_at, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
-        [
-            discordId,
-            character.character_id,
-            licence,
-            cadConfig.cadType,
-            cadResult.recordId,
-            formatSqlDate(cadResult.issuedAt),
-            formatSqlDate(cadResult.expiresAt),
-            Math.floor(Date.now() / 1000)
-        ]
-    );
-
-    return interaction.editReply({
-        content:
-            `✅ **${licenceData.label}** was added to **${character.first_name} ${character.last_name}**.\n` +
-            `CAD Type: **${cadConfig.cadType}**\n` +
-            `Status: **PENDING**\n` +
-            `Expiration: **${formatCadDate(cadResult.expiresAt)}**`
-    });
 }
 
 async function buyLicenceForUser(interaction, licence) {
