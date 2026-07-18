@@ -39,6 +39,46 @@ const INFRINGEMENT_WEBHOOK = process.env.INFRINGEMENT_WEBHOOK || '';
 const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
 const DRIVER_LICENCE_PRICE = Number(process.env.DRIVER_LICENCE_PRICE || 2500);
 
+const SONORAN_COMMUNITY_ID = process.env.SONORAN_COMMUNITY_ID || '';
+const SONORAN_API_KEY = process.env.SONORAN_API_KEY || '';
+const SONORAN_NEW_RECORD_URL = 'https://api.sonorancad.com/general/new_record';
+
+const CAD_LICENCE_CONFIG = {
+    driver: {
+        label: 'Driver Licence',
+        cadType: 'DRIVER',
+        expiryYears: 2
+    },
+    motorcycle: {
+        label: 'Motorcycle Licence',
+        cadType: 'MOTORCYCLE',
+        expiryYears: 2
+    },
+    boat: {
+        label: 'Boat Licence',
+        cadType: 'BOAT',
+        expiryYears: 2
+    },
+    pilot: {
+        label: 'Pilot Licence',
+        cadType: 'PILOT',
+        expiryYears: 2
+    },
+    cdl: {
+        label: 'Commercial Driver License (CDL)',
+        cadType: 'CDL',
+        expiryYears: 2
+    }
+};
+
+const SONORAN_LICENCE_TEMPLATE_ID = 4;
+const SONORAN_LICENCE_FIELDS = {
+    dmvStatus: '252c4250da9421cbd',
+    status: '878766af4964853a7',
+    type: '7eddab31daf4a0182',
+    expiration: '_54iz1scv7'
+};
+
 // Discord role(s) allowed to open and use the vehicle shop.
 // Example environment variable:
 // DRIVER_LICENCE_ROLE_IDS=123456789012345678
@@ -227,14 +267,61 @@ async function ensureVehicleShopColumns() {
 
 
 const LICENCE_SHOP = {
-    driver: { label: 'Driver Licence', price: DRIVER_LICENCE_PRICE, description: 'Required before purchasing road vehicles from the vehicle shop.' },
-    firearm: { label: 'Firearm Licence', price: Number(process.env.FIREARM_LICENCE_PRICE || 7500), description: 'Required before purchasing civilian firearms and ammunition from Ammu-Nation.' },
-    cdl: { label: 'Commercial Driver License (CDL)', price: 10000, description: 'Required for heavy trucks and trailer vehicles.' },
-    taxi: { label: 'Taxi Driver Permit', price: 2500, description: 'Required for taxi vehicles and taxi work.' },
-    bus: { label: 'Passenger Endorsement', price: 5000, description: 'Required for bus and coach vehicles.' },
-    tow: { label: 'Tow Operator Permit', price: 3500, description: 'Required for tow trucks and recovery vehicles.' },
-    airport: { label: 'Airport Security Pass', price: 2000, description: 'Required for airport cargo vehicles.' },
-    tanker: { label: 'Hazmat / Tanker Endorsement', price: 7500, description: 'Required for tanker/fuel delivery vehicles.' }
+    driver: {
+        label: 'Driver Licence',
+        price: DRIVER_LICENCE_PRICE,
+        description: 'Required before purchasing road vehicles from the vehicle shop.'
+    },
+    motorcycle: {
+        label: 'Motorcycle Licence',
+        price: Number(process.env.MOTORCYCLE_LICENCE_PRICE || 5000),
+        description: 'Creates a pending Motorcycle licence for a selected CAD character.'
+    },
+    boat: {
+        label: 'Boat Licence',
+        price: Number(process.env.BOAT_LICENCE_PRICE || 7500),
+        description: 'Creates a pending Boat licence for a selected CAD character.'
+    },
+    pilot: {
+        label: 'Pilot Licence',
+        price: Number(process.env.PILOT_LICENCE_PRICE || 15000),
+        description: 'Creates a pending Pilot licence for a selected CAD character.'
+    },
+    cdl: {
+        label: 'Commercial Driver License (CDL)',
+        price: Number(process.env.CDL_LICENCE_PRICE || 10000),
+        description: 'Required for heavy trucks and creates a pending CDL record in CAD.'
+    },
+    firearm: {
+        label: 'Firearm Licence',
+        price: Number(process.env.FIREARM_LICENCE_PRICE || 7500),
+        description: 'Required before purchasing civilian firearms and ammunition from Ammu-Nation.'
+    },
+    taxi: {
+        label: 'Taxi Driver Permit',
+        price: 2500,
+        description: 'Required for taxi vehicles and taxi work.'
+    },
+    bus: {
+        label: 'Passenger Endorsement',
+        price: 5000,
+        description: 'Required for bus and coach vehicles.'
+    },
+    tow: {
+        label: 'Tow Operator Permit',
+        price: 3500,
+        description: 'Required for tow trucks and recovery vehicles.'
+    },
+    airport: {
+        label: 'Airport Security Pass',
+        price: 2000,
+        description: 'Required for airport cargo vehicles.'
+    },
+    tanker: {
+        label: 'Hazmat / Tanker Endorsement',
+        price: 7500,
+        description: 'Required for tanker/fuel delivery vehicles.'
+    }
 };
 
 async function ensureLicenceColumns() {
@@ -249,6 +336,23 @@ async function ensureLicenceColumns() {
                 active TINYINT(1) NOT NULL DEFAULT 1,
                 created_at BIGINT NULL,
                 UNIQUE KEY uniq_discord_licence (discord_id, licence)
+            )
+        `).catch(() => {});
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_character_licences (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                discord_id VARCHAR(50) NOT NULL,
+                character_id VARCHAR(100) NOT NULL,
+                licence VARCHAR(100) NOT NULL,
+                cad_type VARCHAR(50) NOT NULL,
+                cad_record_id VARCHAR(100) NULL,
+                issued_at DATE NOT NULL,
+                expires_at DATE NOT NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+                created_at BIGINT NOT NULL,
+                UNIQUE KEY uniq_character_licence (character_id, licence),
+                KEY idx_character_licence_discord (discord_id),
+                KEY idx_character_licence_character (character_id)
             )
         `).catch(() => {});
     } catch (error) {
@@ -298,6 +402,341 @@ function buildLicenceSelect() {
     );
 }
 
+
+function isCadLicence(licence) {
+    return Boolean(CAD_LICENCE_CONFIG[licence]);
+}
+
+function formatCadDate(date) {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const year = date.getFullYear();
+    return `${month}/${day}/${year}`;
+}
+
+function formatSqlDate(date) {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function addYearsSafe(date, years) {
+    const result = new Date(date);
+    const originalMonth = result.getMonth();
+    result.setFullYear(result.getFullYear() + years);
+
+    // Handle 29 February rolling into March.
+    if (result.getMonth() !== originalMonth) {
+        result.setDate(0);
+    }
+
+    return result;
+}
+
+async function getDiscordCharacters(discordId) {
+    const [rows] = await pool.query(
+        `SELECT DISTINCT
+            c.character_id,
+            c.owner_license,
+            c.first_name,
+            c.last_name,
+            c.middle_name,
+            DATE_FORMAT(c.date_of_birth, '%Y-%m-%d') AS date_of_birth,
+            c.sex,
+            c.residence,
+            c.zip_code,
+            c.occupation,
+            c.height,
+            c.weight,
+            c.skin_tone,
+            c.hair_color,
+            c.eye_color,
+            c.alias_name,
+            c.emergency_contact,
+            c.emergency_relationship,
+            c.phone_number
+         FROM galrp_characters c
+         LEFT JOIN bot_links b ON b.license = c.owner_license
+         WHERE c.is_deleted = 0
+           AND (c.owner_discord = ? OR b.discord_id = ?)
+         ORDER BY c.created_at ASC`,
+        [discordId, discordId]
+    );
+
+    return rows;
+}
+
+function buildCadCharacterSelect(licence, characters) {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`cad_licence_character:${licence}`)
+            .setPlaceholder('Choose the character for this licence')
+            .addOptions(
+                characters.slice(0, 25).map(character => ({
+                    label: `${character.first_name} ${character.last_name}`.slice(0, 100),
+                    description: `${character.character_id}${character.date_of_birth ? ` • DOB ${character.date_of_birth}` : ''}`.slice(0, 100),
+                    value: String(character.character_id).slice(0, 100)
+                }))
+            )
+    );
+}
+
+async function showCadCharacterSelection(interaction, licence, purchasedNow = false) {
+    const data = LICENCE_SHOP[licence];
+    const characters = await getDiscordCharacters(interaction.user.id);
+
+    if (!characters.length) {
+        return interaction.reply({
+            content:
+                `${purchasedNow ? `You bought **${data.label}**, but ` : ''}` +
+                'I could not find any characters linked to your Discord account. ' +
+                'Join the server, use your linked FiveM account, and create/select a character first.',
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    return interaction.reply({
+        content:
+            `${purchasedNow ? `✅ Bought **${data.label}**. ` : `You already own **${data.label}**. `}` +
+            'Choose the character that should receive the pending Sonoran CAD licence.',
+        components: [buildCadCharacterSelect(licence, characters)],
+        flags: MessageFlags.Ephemeral
+    });
+}
+
+function normaliseCadSex(value) {
+    const sex = String(value || '').trim().toUpperCase();
+    if (sex.startsWith('F')) return 'F';
+    return 'M';
+}
+
+function normaliseCadHair(value) {
+    const hair = String(value || '').trim().toUpperCase();
+    if (hair === 'GRAY') return 'GREY';
+    return hair;
+}
+
+async function createSonoranCadLicence(character, licence) {
+    const config = CAD_LICENCE_CONFIG[licence];
+
+    if (!config) {
+        return { ok: false, message: 'That licence is not configured for Sonoran CAD.' };
+    }
+
+    if (!SONORAN_COMMUNITY_ID || !SONORAN_API_KEY) {
+        return {
+            ok: false,
+            message: 'SONORAN_COMMUNITY_ID or SONORAN_API_KEY is missing from the bot environment variables.'
+        };
+    }
+
+    const issuedAt = new Date();
+    const expiresAt = addYearsSafe(issuedAt, config.expiryYears);
+
+    const replaceValues = {
+        [SONORAN_LICENCE_FIELDS.dmvStatus]: '0',
+        [SONORAN_LICENCE_FIELDS.status]: 'PENDING',
+        [SONORAN_LICENCE_FIELDS.type]: config.cadType,
+        [SONORAN_LICENCE_FIELDS.expiration]: formatCadDate(expiresAt),
+
+        first: String(character.first_name || ''),
+        last: String(character.last_name || ''),
+        mi: String(character.middle_name || ''),
+        dob: character.date_of_birth ? formatCadDate(new Date(`${character.date_of_birth}T00:00:00`)) : '',
+        sex: normaliseCadSex(character.sex),
+        aka: String(character.alias_name || ''),
+        residence: String(character.residence || ''),
+        zip: String(character.zip_code || ''),
+        occupation: String(character.occupation || ''),
+        height: String(character.height || ''),
+        weight: String(character.weight || ''),
+        skin: String(character.skin_tone || '').toUpperCase(),
+        hair: normaliseCadHair(character.hair_color),
+        eyes: String(character.eye_color || '').toUpperCase(),
+        emergencyContact: String(character.emergency_contact || ''),
+        emergencyRelationship: String(character.emergency_relationship || ''),
+        emergencyContactNumber: String(character.phone_number || '')
+    };
+
+    const response = await fetch(SONORAN_NEW_RECORD_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            id: SONORAN_COMMUNITY_ID,
+            key: SONORAN_API_KEY,
+            type: 'NEW_RECORD',
+            data: [{
+                user: character.owner_license,
+                useDictionary: true,
+                recordTypeId: SONORAN_LICENCE_TEMPLATE_ID,
+                replaceValues,
+                record: null
+            }]
+        })
+    });
+
+    const responseText = await response.text();
+    let responseData = null;
+
+    try {
+        responseData = JSON.parse(responseText);
+    } catch (_) {}
+
+    if (!response.ok) {
+        return {
+            ok: false,
+            message: `Sonoran CAD rejected the licence (${response.status}): ${responseText.slice(0, 500)}`
+        };
+    }
+
+    const errorText = String(responseText || '').toUpperCase();
+    if (
+        errorText.includes('INVALID ') ||
+        errorText.includes('ERROR') ||
+        errorText.includes('NOT ENABLED')
+    ) {
+        return {
+            ok: false,
+            message: `Sonoran CAD did not create the licence: ${responseText.slice(0, 500)}`
+        };
+    }
+
+    const recordId =
+        responseData?.id ??
+        responseData?.recordId ??
+        responseData?.record?.id ??
+        responseData?.[0]?.id ??
+        null;
+
+    return {
+        ok: true,
+        recordId: recordId ? String(recordId) : null,
+        issuedAt,
+        expiresAt,
+        raw: responseText
+    };
+}
+
+async function assignCadLicenceToCharacter(interaction, licence, characterId) {
+    const discordId = interaction.user.id;
+    const licenceData = LICENCE_SHOP[licence];
+    const cadConfig = CAD_LICENCE_CONFIG[licence];
+
+    if (!licenceData || !cadConfig) {
+        return interaction.reply({
+            content: 'That CAD licence type is invalid.',
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    const owned = await hasLicence(discordId, licence);
+    if (!owned) {
+        return interaction.reply({
+            content: `You must purchase **${licenceData.label}** before assigning it to a character.`,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    const [characters] = await pool.query(
+        `SELECT DISTINCT
+            c.character_id,
+            c.owner_license,
+            c.first_name,
+            c.last_name,
+            c.middle_name,
+            DATE_FORMAT(c.date_of_birth, '%Y-%m-%d') AS date_of_birth,
+            c.sex,
+            c.residence,
+            c.zip_code,
+            c.occupation,
+            c.height,
+            c.weight,
+            c.skin_tone,
+            c.hair_color,
+            c.eye_color,
+            c.alias_name,
+            c.emergency_contact,
+            c.emergency_relationship,
+            c.phone_number
+         FROM galrp_characters c
+         LEFT JOIN bot_links b ON b.license = c.owner_license
+         WHERE c.character_id = ?
+           AND c.is_deleted = 0
+           AND (c.owner_discord = ? OR b.discord_id = ?)
+         LIMIT 1`,
+        [characterId, discordId, discordId]
+    );
+
+    if (!characters.length) {
+        return interaction.reply({
+            content: 'That character was not found or does not belong to your linked Discord account.',
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    const character = characters[0];
+
+    const [existing] = await pool.query(
+        `SELECT id, expires_at, status
+         FROM bot_character_licences
+         WHERE character_id = ? AND licence = ?
+         LIMIT 1`,
+        [character.character_id, licence]
+    );
+
+    if (existing.length) {
+        return interaction.reply({
+            content:
+                `**${character.first_name} ${character.last_name}** already has the ` +
+                `**${licenceData.label}** assignment. Status: **${existing[0].status}**, ` +
+                `expires **${existing[0].expires_at}**.`,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    let cadResult;
+    try {
+        cadResult = await createSonoranCadLicence(character, licence);
+    } catch (error) {
+        console.error('Sonoran CAD licence creation error:', error);
+        cadResult = { ok: false, message: error.message || 'Unknown Sonoran CAD error.' };
+    }
+
+    if (!cadResult.ok) {
+        return interaction.editReply({
+            content:
+                `Your **${licenceData.label}** entitlement is still owned, but the CAD record was not created.\n` +
+                `${cadResult.message}\n\nYou can select this licence again and retry for free.`
+        });
+    }
+
+    await pool.query(
+        `INSERT INTO bot_character_licences
+            (discord_id, character_id, licence, cad_type, cad_record_id, issued_at, expires_at, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+        [
+            discordId,
+            character.character_id,
+            licence,
+            cadConfig.cadType,
+            cadResult.recordId,
+            formatSqlDate(cadResult.issuedAt),
+            formatSqlDate(cadResult.expiresAt),
+            Math.floor(Date.now() / 1000)
+        ]
+    );
+
+    return interaction.editReply({
+        content:
+            `✅ **${licenceData.label}** was added to **${character.first_name} ${character.last_name}**.\n` +
+            `CAD Type: **${cadConfig.cadType}**\n` +
+            `Status: **PENDING**\n` +
+            `Expiration: **${formatCadDate(cadResult.expiresAt)}**`
+    });
+}
+
 async function buyLicenceForUser(interaction, licence) {
     const discordId = interaction.user.id;
     const data = LICENCE_SHOP[licence];
@@ -309,14 +748,31 @@ async function buyLicenceForUser(interaction, licence) {
     const member = await interaction.guild.members.fetch(discordId);
 
     if (licence === 'driver' && memberHasDriversLicence(member)) {
-        return interaction.reply({
-            content: 'You already have the **Driver Licence** Discord role.',
-            flags: MessageFlags.Ephemeral
-        });
+        await pool.query(
+            `INSERT INTO bot_job_licences (discord_id, licence, active, created_at)
+             VALUES (?, 'driver', 1, ?)
+             ON DUPLICATE KEY UPDATE active = 1`,
+            [discordId, Math.floor(Date.now() / 1000)]
+        );
+
+        return showCadCharacterSelection(interaction, 'driver', false);
     }
 
     const already = await hasLicence(discordId, licence);
     if (already) {
+        if (isCadLicence(licence)) {
+            if (licence === 'driver' && !memberHasDriversLicence(member)) {
+                const discordRole = getDriversLicenceDiscordRole(interaction.guild);
+                if (discordRole && discordRole.editable) {
+                    await member.roles.add(discordRole).catch(error =>
+                        console.error('Driver Licence role restore error:', error)
+                    );
+                }
+            }
+
+            return showCadCharacterSelection(interaction, licence, false);
+        }
+
         // Repair the Discord role if the database says they own it but the role is missing.
         if (licence === 'driver') {
             const discordRole = getDriversLicenceDiscordRole(interaction.guild);
@@ -397,11 +853,12 @@ async function buyLicenceForUser(interaction, licence) {
 
         await connection.commit();
 
+        if (isCadLicence(licence)) {
+            return showCadCharacterSelection(interaction, licence, true);
+        }
+
         return interaction.reply({
-            content:
-                licence === 'driver'
-                    ? `Bought **${data.label}** for **$${data.price}**. The Discord role has been added.`
-                    : `Bought **${data.label}** for **$${data.price}**.`,
+            content: `Bought **${data.label}** for **$${data.price}**.`,
             flags: MessageFlags.Ephemeral
         });
     } catch (error) {
@@ -1925,8 +2382,25 @@ const commands = [
     new SlashCommandBuilder().setName('licences').setDescription('View and buy licences'),
     new SlashCommandBuilder()
         .setName('buylicence')
-        .setDescription('Buy a licence')
-        .addStringOption(o => o.setName('licence').setDescription('Licence code').setRequired(true)),
+        .setDescription('Buy or assign a licence')
+        .addStringOption(o =>
+            o.setName('licence')
+                .setDescription('Licence')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Driver Licence', value: 'driver' },
+                    { name: 'Motorcycle Licence', value: 'motorcycle' },
+                    { name: 'Boat Licence', value: 'boat' },
+                    { name: 'Pilot Licence', value: 'pilot' },
+                    { name: 'Commercial Driver License (CDL)', value: 'cdl' },
+                    { name: 'Firearm Licence', value: 'firearm' },
+                    { name: 'Taxi Driver Permit', value: 'taxi' },
+                    { name: 'Passenger Endorsement', value: 'bus' },
+                    { name: 'Tow Operator Permit', value: 'tow' },
+                    { name: 'Airport Security Pass', value: 'airport' },
+                    { name: 'Hazmat / Tanker Endorsement', value: 'tanker' }
+                )
+        ),
     new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
     new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
     new SlashCommandBuilder().setName('work').setDescription('Work for money'),
@@ -2028,6 +2502,12 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isStringSelectMenu()) {
             if (interaction.customId === 'licence_select') {
                 return buyLicenceForUser(interaction, interaction.values[0]);
+            }
+
+            if (interaction.customId.startsWith('cad_licence_character:')) {
+                const licence = interaction.customId.split(':')[1];
+                const characterId = interaction.values[0];
+                return assignCadLicenceToCharacter(interaction, licence, characterId);
             }
 
             if (interaction.customId === 'shop_category_select') {
