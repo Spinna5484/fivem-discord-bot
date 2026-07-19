@@ -790,15 +790,21 @@ function buildVehicleListEmbed(section, vehicles, page = 0) {
 }
 
 function buildShopPageButtons(section, page, totalVehicles) {
+    const category = normaliseCategory(section);
     const totalPages = Math.max(1, Math.ceil(totalVehicles / SHOP_PAGE_SIZE));
+    const previousPage = Math.max(page - 1, 0);
+    const nextPage = Math.min(page + 1, totalPages - 1);
+
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-            .setCustomId(`shop_page:${normaliseCategory(section)}:${Math.max(page - 1, 0)}`)
+            // Include the direction so Previous and Next never share a custom ID
+            // when a category only has one page.
+            .setCustomId(`shop_page_prev:${category}:${previousPage}`)
             .setLabel('Previous')
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page <= 0),
         new ButtonBuilder()
-            .setCustomId(`shop_page:${normaliseCategory(section)}:${Math.min(page + 1, totalPages - 1)}`)
+            .setCustomId(`shop_page_next:${category}:${nextPage}`)
             .setLabel('Next')
             .setStyle(ButtonStyle.Primary)
             .setDisabled(page >= totalPages - 1),
@@ -2525,7 +2531,10 @@ client.on('interactionCreate', async interaction => {
                 });
             }
 
-            if (interaction.customId.startsWith('shop_page:')) {
+            if (
+                interaction.customId.startsWith('shop_page_prev:') ||
+                interaction.customId.startsWith('shop_page_next:')
+            ) {
                 const [, section, pageRaw] = interaction.customId.split(':');
                 const page = Number(pageRaw) || 0;
                 const member = await interaction.guild.members.fetch(interaction.user.id);
