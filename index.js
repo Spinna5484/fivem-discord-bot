@@ -117,7 +117,7 @@ function memberHasDriversLicence(member) {
 }
 
 function driversLicenceDeniedReply() {
-    return 'You need the **Driver Licence** role in Discord before you can access the vehicle shop.';
+    return 'You need the **Driver Licence** role in Discord to buy this vehicle. Push bikes do not require one.';
 }
 
 
@@ -205,8 +205,9 @@ function generatePlate(length = 8) {
 }
 
 const VEHICLE_CATEGORIES = {
+    pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: null, required_licence: null },
     car: { label: 'Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: null },
-    bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: null },
+    bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: 'motorcycle' },
     van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
     light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
     heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'cdl' },
@@ -1623,7 +1624,11 @@ async function purchaseVehicleForUser(interaction, model) {
 
     const vehicle = vehicleRows[0];
 
-    if (!memberHasDriversLicence(member)) {
+    const vehicleCategory = String(vehicle.category || 'car').toLowerCase().trim();
+    const isPushBike = vehicleCategory === 'pushbike';
+
+    // Push bikes can be purchased without a Driver Licence.
+    if (!isPushBike && !memberHasDriversLicence(member)) {
         return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
     }
 
