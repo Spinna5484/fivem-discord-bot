@@ -205,28 +205,43 @@ function generatePlate(length = 8) {
 }
 
 const VEHICLE_CATEGORIES = {
-    pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: null, required_licence: null },
-    car: { label: 'Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: null },
-    bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: 'motorcycle' },
-    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
-    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
-    heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'cdl' },
+    pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: 'pushbike', required_licence: null },
+    sedan: { label: 'Sedan', emoji: '🚗', category: 'sedan', vehicle_class: 'sedan', required_licence: 'driver' },
+    coupe: { label: 'Coupe', emoji: '🏎️', category: 'coupe', vehicle_class: 'coupe', required_licence: 'driver' },
+    suv: { label: 'SUV', emoji: '🚙', category: 'suv', vehicle_class: 'suv', required_licence: 'driver' },
+    truck: { label: 'Truck', emoji: '🚚', category: 'truck', vehicle_class: null, required_licence: null },
+    offroad: { label: 'Offroad', emoji: '🏕️', category: 'offroad', vehicle_class: 'offroad', required_licence: 'driver' },
+    van: { label: 'Van', emoji: '🚐', category: 'van', vehicle_class: 'van', required_licence: 'driver' },
+    motorcycle: { label: 'Motorcycle', emoji: '🏍️', category: 'motorcycle', vehicle_class: 'motorcycle', required_licence: 'motorcycle' },
+    marine: { label: 'Marine', emoji: '🚤', category: 'marine', vehicle_class: 'marine', required_licence: 'boat' },
+    aircraft: { label: 'Aircraft', emoji: '✈️', category: 'aircraft', vehicle_class: 'aircraft', required_licence: 'pilot' },
     taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi' },
-    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus' },
+    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'cdl' },
     utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: null },
-    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null },
-    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport' }
+    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null }
 };
 
 const SHOP_PAGE_SIZE = 10;
 
 function normaliseCategory(category) {
-    const value = String(category || 'car').toLowerCase().trim();
-    return VEHICLE_CATEGORIES[value] ? value : 'car';
+    const value = String(category || 'sedan').toLowerCase().trim();
+    return VEHICLE_CATEGORIES[value] ? value : 'sedan';
 }
 
 function getCategoryData(category) {
-    return VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.car;
+    return VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.sedan;
+}
+
+function categoryForSection(section) {
+    return getCategoryData(section).category;
+}
+
+function classForSection(section) {
+    return getCategoryData(section).vehicle_class;
+}
+
+function licenceForSection(section) {
+    return getCategoryData(section).required_licence;
 }
 
 function buildCategorySelect() {
@@ -246,11 +261,12 @@ function buildCategorySelect() {
 
 async function ensureVehicleShopColumns() {
     try {
-        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN category VARCHAR(50) NOT NULL DEFAULT 'car'`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN category VARCHAR(50) NOT NULL DEFAULT 'sedan'`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN image_url TEXT NULL`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_new TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_popular TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN vehicle_class VARCHAR(50) NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN required_licence VARCHAR(100) NULL`).catch(() => {});
     } catch (error) {
         console.error('Vehicle shop schema ensure error:', error);
     }
@@ -302,11 +318,6 @@ const LICENCE_SHOP = {
         label: 'Tow Operator Permit',
         price: 3500,
         description: 'Required for tow trucks and recovery vehicles.'
-    },
-    airport: {
-        label: 'Airport Security Pass',
-        price: 2000,
-        description: 'Required for airport cargo vehicles.'
     },
     tanker: {
         label: 'Hazmat / Tanker Endorsement',
@@ -738,7 +749,7 @@ async function getAvailableVehiclesForMember(member, section = null) {
         .filter(v => {
             if (!sectionData) return true;
 
-            const vehicleCategory = String(v.category || 'car').toLowerCase().trim();
+            const vehicleCategory = String(v.category || 'sedan').toLowerCase().trim();
             const vehicleClass = v.vehicle_class ? String(v.vehicle_class).toLowerCase().trim() : null;
 
             if (vehicleCategory !== sectionData.category) return false;
@@ -749,7 +760,13 @@ async function getAvailableVehiclesForMember(member, section = null) {
 
             return true;
         })
-        .sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+        .sort((a, b) => {
+            const priceDifference = Number(a.price || 0) - Number(b.price || 0);
+            if (priceDifference !== 0) return priceDifference;
+
+            return String(a.label || a.vehicle_model || '')
+                .localeCompare(String(b.label || b.vehicle_model || ''));
+        });
 }
 
 function buildVehicleListEmbed(section, vehicles, page = 0) {
@@ -839,7 +856,7 @@ function buildPurchaseConfirm(vehicle) {
         .addFields(
             { name: 'Model', value: `\`${vehicle.vehicle_model}\``, inline: true },
             { name: 'Price', value: `$${vehicle.price}`, inline: true },
-            { name: 'Category', value: `${vehicle.category || 'car'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
+            { name: 'Category', value: `${vehicle.category || 'sedan'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
             { name: 'Licence', value: vehicle.required_licence ? `Required: ${vehicle.required_licence}` : 'None', inline: true }
         )
         .setTimestamp(new Date());
@@ -1630,7 +1647,7 @@ async function purchaseVehicleForUser(interaction, model) {
 
     const vehicle = vehicleRows[0];
 
-    const vehicleCategory = String(vehicle.category || 'car').toLowerCase().trim();
+    const vehicleCategory = String(vehicle.category || 'sedan').toLowerCase().trim();
     const isPushBike = vehicleCategory === 'pushbike';
 
     // Push bikes can be purchased without a Driver Licence.
@@ -2258,7 +2275,6 @@ const commands = [
                     { name: 'Taxi Driver Permit', value: 'taxi' },
                     { name: 'Passenger Endorsement', value: 'bus' },
                     { name: 'Tow Operator Permit', value: 'tow' },
-                    { name: 'Airport Security Pass', value: 'airport' },
                     { name: 'Hazmat / Tanker Endorsement', value: 'tanker' }
                 )
         ),
@@ -2279,16 +2295,20 @@ const commands = [
         .addIntegerOption(o => o.setName('price').setDescription('Vehicle price').setRequired(true))
         .addStringOption(o => o.setName('section').setDescription('Shop section').setRequired(true)
             .addChoices(
-                { name: 'Cars', value: 'car' },
-                { name: 'Motorcycles', value: 'bike' },
-                { name: 'Vans', value: 'van' },
-                { name: 'Light Trucks - No CDL', value: 'light_truck' },
-                { name: 'Heavy Trucks - CDL', value: 'heavy_truck' },
-                { name: 'Taxi - Accreditation', value: 'taxi' },
-                { name: 'Buses - Bus Endorsement', value: 'bus' },
+                { name: 'Push Bikes', value: 'pushbike' },
+                { name: 'Sedan', value: 'sedan' },
+                { name: 'Coupe', value: 'coupe' },
+                { name: 'SUV', value: 'suv' },
+                { name: 'Truck', value: 'truck' },
+                { name: 'Offroad', value: 'offroad' },
+                { name: 'Van', value: 'van' },
+                { name: 'Motorcycle', value: 'motorcycle' },
+                { name: 'Marine', value: 'marine' },
+                { name: 'Aircraft', value: 'aircraft' },
+                { name: 'Taxi', value: 'taxi' },
+                { name: 'Bus (CDL)', value: 'bus' },
                 { name: 'Utility / Tow', value: 'utility' },
-                { name: 'Emergency', value: 'emergency' },
-                { name: 'Airport', value: 'airport' }
+                { name: 'Emergency', value: 'emergency' }
             ))
         .addStringOption(o => o.setName('roleid').setDescription('Optional required Discord role ID').setRequired(false)),
     new SlashCommandBuilder().setName('shop').setDescription('View vehicles'),
