@@ -1,4 +1,4 @@
-const {
+onst {
     Client,
     GatewayIntentBits,
     REST,
@@ -163,6 +163,7 @@ const COMMAND_CHANNELS = {
     buylicence: process.env.CHANNEL_PURCHASE,
     addvehicle: process.env.CHANNEL_PURCHASE,
     vehicleclasses: process.env.CHANNEL_PURCHASE,
+    business: process.env.CHANNEL_BUSINESS || process.env.CHANNEL_PURCHASE,
 
 };
 
@@ -205,43 +206,28 @@ function generatePlate(length = 8) {
 }
 
 const VEHICLE_CATEGORIES = {
-    pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: 'pushbike', required_licence: null },
-    sedan: { label: 'Sedan', emoji: '🚗', category: 'sedan', vehicle_class: 'sedan', required_licence: 'driver' },
-    coupe: { label: 'Coupe', emoji: '🏎️', category: 'coupe', vehicle_class: 'coupe', required_licence: 'driver' },
-    suv: { label: 'SUV', emoji: '🚙', category: 'suv', vehicle_class: 'suv', required_licence: 'driver' },
-    truck: { label: 'Truck', emoji: '🚚', category: 'truck', vehicle_class: null, required_licence: null },
-    offroad: { label: 'Offroad', emoji: '🏕️', category: 'offroad', vehicle_class: 'offroad', required_licence: 'driver' },
-    van: { label: 'Van', emoji: '🚐', category: 'van', vehicle_class: 'van', required_licence: 'driver' },
-    motorcycle: { label: 'Motorcycle', emoji: '🏍️', category: 'motorcycle', vehicle_class: 'motorcycle', required_licence: 'motorcycle' },
-    marine: { label: 'Marine', emoji: '🚤', category: 'marine', vehicle_class: 'marine', required_licence: 'boat' },
-    aircraft: { label: 'Aircraft', emoji: '✈️', category: 'aircraft', vehicle_class: 'aircraft', required_licence: 'pilot' },
+    pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: null, required_licence: null },
+    car: { label: 'Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: null },
+    bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: 'motorcycle' },
+    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
+    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
+    heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'cdl' },
     taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi' },
-    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'cdl' },
+    bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus' },
     utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: null },
-    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null }
+    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null },
+    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport' }
 };
 
 const SHOP_PAGE_SIZE = 10;
 
 function normaliseCategory(category) {
-    const value = String(category || 'sedan').toLowerCase().trim();
-    return VEHICLE_CATEGORIES[value] ? value : 'sedan';
+    const value = String(category || 'car').toLowerCase().trim();
+    return VEHICLE_CATEGORIES[value] ? value : 'car';
 }
 
 function getCategoryData(category) {
-    return VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.sedan;
-}
-
-function categoryForSection(section) {
-    return getCategoryData(section).category;
-}
-
-function classForSection(section) {
-    return getCategoryData(section).vehicle_class;
-}
-
-function licenceForSection(section) {
-    return getCategoryData(section).required_licence;
+    return VEHICLE_CATEGORIES[normaliseCategory(category)] || VEHICLE_CATEGORIES.car;
 }
 
 function buildCategorySelect() {
@@ -261,12 +247,11 @@ function buildCategorySelect() {
 
 async function ensureVehicleShopColumns() {
     try {
-        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN category VARCHAR(50) NOT NULL DEFAULT 'sedan'`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN category VARCHAR(50) NOT NULL DEFAULT 'car'`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN image_url TEXT NULL`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_new TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_popular TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN vehicle_class VARCHAR(50) NULL`).catch(() => {});
-        await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN required_licence VARCHAR(100) NULL`).catch(() => {});
     } catch (error) {
         console.error('Vehicle shop schema ensure error:', error);
     }
@@ -318,6 +303,11 @@ const LICENCE_SHOP = {
         label: 'Tow Operator Permit',
         price: 3500,
         description: 'Required for tow trucks and recovery vehicles.'
+    },
+    airport: {
+        label: 'Airport Security Pass',
+        price: 2000,
+        description: 'Required for airport cargo vehicles.'
     },
     tanker: {
         label: 'Hazmat / Tanker Endorsement',
@@ -749,7 +739,7 @@ async function getAvailableVehiclesForMember(member, section = null) {
         .filter(v => {
             if (!sectionData) return true;
 
-            const vehicleCategory = String(v.category || 'sedan').toLowerCase().trim();
+            const vehicleCategory = String(v.category || 'car').toLowerCase().trim();
             const vehicleClass = v.vehicle_class ? String(v.vehicle_class).toLowerCase().trim() : null;
 
             if (vehicleCategory !== sectionData.category) return false;
@@ -760,13 +750,7 @@ async function getAvailableVehiclesForMember(member, section = null) {
 
             return true;
         })
-        .sort((a, b) => {
-            const priceDifference = Number(a.price || 0) - Number(b.price || 0);
-            if (priceDifference !== 0) return priceDifference;
-
-            return String(a.label || a.vehicle_model || '')
-                .localeCompare(String(b.label || b.vehicle_model || ''));
-        });
+        .sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
 }
 
 function buildVehicleListEmbed(section, vehicles, page = 0) {
@@ -856,7 +840,7 @@ function buildPurchaseConfirm(vehicle) {
         .addFields(
             { name: 'Model', value: `\`${vehicle.vehicle_model}\``, inline: true },
             { name: 'Price', value: `$${vehicle.price}`, inline: true },
-            { name: 'Category', value: `${vehicle.category || 'sedan'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
+            { name: 'Category', value: `${vehicle.category || 'car'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
             { name: 'Licence', value: vehicle.required_licence ? `Required: ${vehicle.required_licence}` : 'None', inline: true }
         )
         .setTimestamp(new Date());
@@ -1632,6 +1616,343 @@ async function processOverdueBills() {
 }
 
 
+
+const BUSINESS_EMBED_COLOUR = 15844367;
+
+async function getAvailableBusinesses() {
+    const [rows] = await pool.query(
+        `SELECT business_key, name, business_type, purchase_price, bank_balance
+         FROM galrp_businesses
+         WHERE for_sale = 1 AND owner_character_id IS NULL
+         ORDER BY purchase_price ASC, name ASC`
+    );
+    return rows;
+}
+
+async function getOwnedBusinesses(discordId) {
+    const [rows] = await pool.query(
+        `SELECT b.business_key, b.name, b.business_type, b.purchase_price,
+                b.bank_balance, b.owner_character_id,
+                CONCAT(c.first_name, ' ', c.last_name) AS owner_character_name
+         FROM galrp_businesses b
+         LEFT JOIN galrp_characters c ON c.character_id = b.owner_character_id
+         WHERE b.owner_discord_id = ? AND b.for_sale = 0
+         ORDER BY b.name ASC`,
+        [discordId]
+    );
+    return rows;
+}
+
+async function getDiscordCharacters(discordId) {
+    const [rows] = await pool.query(
+        `SELECT character_id, first_name, last_name, character_status
+         FROM galrp_characters
+         WHERE owner_discord = ? AND is_deleted = 0
+         ORDER BY created_at ASC`,
+        [discordId]
+    );
+    return rows;
+}
+
+async function ownsBusinessType(discordId, businessType) {
+    const [rows] = await pool.query(
+        `SELECT 1
+         FROM galrp_businesses
+         WHERE owner_discord_id = ?
+           AND business_type = ?
+           AND for_sale = 0
+         LIMIT 1`,
+        [discordId, businessType]
+    );
+    return rows.length > 0;
+}
+
+function buildBusinessEmbed(available, owned) {
+    const availableText = available.length
+        ? available.map(b =>
+            `**${b.name}**\nType: \`${b.business_type}\` • Price: **$${Number(b.purchase_price).toLocaleString()}**`
+        ).join('\n\n')
+        : 'No businesses are currently available for purchase.';
+
+    const ownedText = owned.length
+        ? owned.map(b =>
+            `**${b.name}**\nOwner character: **${b.owner_character_name || b.owner_character_id || 'Unknown'}** • Bank: **$${Number(b.bank_balance || 0).toLocaleString()}**`
+        ).join('\n\n')
+        : 'You do not currently own a business.';
+
+    return new EmbedBuilder()
+        .setTitle('GALRP Business Marketplace')
+        .setDescription(
+            '**Businesses keep their original name and include every company vehicle already parked in their business depot.**'
+        )
+        .addFields(
+            { name: 'Available Businesses', value: availableText.slice(0, 1024) },
+            { name: 'Your Businesses', value: ownedText.slice(0, 1024) }
+        )
+        .setColor(BUSINESS_EMBED_COLOUR)
+        .setTimestamp(new Date());
+}
+
+function buildBusinessSelect(available) {
+    if (!available.length) return null;
+
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId('business_select')
+            .setPlaceholder('Choose an available business')
+            .addOptions(available.slice(0, 25).map(b => ({
+                label: b.name.slice(0, 100),
+                description: `$${Number(b.purchase_price).toLocaleString()} • ${b.business_type}`.slice(0, 100),
+                value: b.business_key
+            })))
+    );
+}
+
+function buildBusinessCharacterSelect(businessKey, characters) {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`business_character:${businessKey}`)
+            .setPlaceholder('Choose the character who will own the business')
+            .addOptions(characters.slice(0, 25).map(c => ({
+                label: `${c.first_name} ${c.last_name}`.slice(0, 100),
+                description: `${c.character_id} • ${c.character_status || 'active'}`.slice(0, 100),
+                value: c.character_id
+            })))
+    );
+}
+
+function buildBusinessConfirmButtons(businessKey, characterId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`business_confirm:${businessKey}:${characterId}`)
+            .setLabel('Buy Business')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('business_cancel')
+            .setLabel('Cancel')
+            .setStyle(ButtonStyle.Secondary)
+    );
+}
+
+async function showBusinessCharacterChoice(interaction, businessKey) {
+    const discordId = interaction.user.id;
+
+    const [businessRows] = await pool.query(
+        `SELECT business_key, name, business_type, purchase_price
+         FROM galrp_businesses
+         WHERE business_key = ? AND for_sale = 1 AND owner_character_id IS NULL
+         LIMIT 1`,
+        [businessKey]
+    );
+
+    if (!businessRows.length) {
+        return interaction.reply({
+            content: 'That business is no longer available.',
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    const business = businessRows[0];
+    const characters = await getDiscordCharacters(discordId);
+
+    if (!characters.length) {
+        return interaction.reply({
+            content: 'No GALRP characters are linked to your Discord account. Create and select a character in-game first.',
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    if (characters.length === 1) {
+        const character = characters[0];
+        return interaction.update({
+            content:
+                `Buy **${business.name}** for **$${Number(business.purchase_price).toLocaleString()}**?\n` +
+                `Owner character: **${character.first_name} ${character.last_name}** (\`${character.character_id}\`)\n\n` +
+                'The company and all business fleet vehicles remain with this business when ownership changes.',
+            embeds: [],
+            components: [buildBusinessConfirmButtons(businessKey, character.character_id)]
+        });
+    }
+
+    return interaction.update({
+        content:
+            `Choose which character will own **${business.name}**.\n` +
+            `Purchase price: **$${Number(business.purchase_price).toLocaleString()}**`,
+        embeds: [],
+        components: [buildBusinessCharacterSelect(businessKey, characters)]
+    });
+}
+
+async function purchaseBusinessForCharacter(interaction, businessKey, characterId) {
+    const discordId = interaction.user.id;
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        const [characters] = await connection.query(
+            `SELECT character_id, first_name, last_name
+             FROM galrp_characters
+             WHERE character_id = ? AND owner_discord = ? AND is_deleted = 0
+             LIMIT 1
+             FOR UPDATE`,
+            [characterId, discordId]
+        );
+
+        if (!characters.length) {
+            await connection.rollback();
+            return interaction.update({
+                content: 'That character does not belong to your Discord account.',
+                embeds: [],
+                components: []
+            });
+        }
+
+        const [businessRows] = await connection.query(
+            `SELECT *
+             FROM galrp_businesses
+             WHERE business_key = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [businessKey]
+        );
+
+        if (!businessRows.length || Number(businessRows[0].for_sale) !== 1 || businessRows[0].owner_character_id) {
+            await connection.rollback();
+            return interaction.update({
+                content: 'That business is no longer available.',
+                embeds: [],
+                components: []
+            });
+        }
+
+        const business = businessRows[0];
+
+        const [characterOwned] = await connection.query(
+            `SELECT name
+             FROM galrp_businesses
+             WHERE owner_character_id = ? AND for_sale = 0
+             LIMIT 1
+             FOR UPDATE`,
+            [characterId]
+        );
+
+        if (characterOwned.length) {
+            await connection.rollback();
+            return interaction.update({
+                content: `That character already owns **${characterOwned[0].name}**.`,
+                embeds: [],
+                components: []
+            });
+        }
+
+        const [balanceRows] = await connection.query(
+            `SELECT balance
+             FROM bot_users
+             WHERE discord_id = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [discordId]
+        );
+
+        const balance = balanceRows.length ? Number(balanceRows[0].balance) : 0;
+        const price = Number(business.purchase_price);
+
+        if (balance < price) {
+            await connection.rollback();
+            return interaction.update({
+                content:
+                    `You need **$${price.toLocaleString()}** but only have **$${balance.toLocaleString()}**.`,
+                embeds: [],
+                components: []
+            });
+        }
+
+        const [chargeResult] = await connection.query(
+            `UPDATE bot_users
+             SET balance = balance - ?
+             WHERE discord_id = ? AND balance >= ?`,
+            [price, discordId, price]
+        );
+
+        if (!chargeResult.affectedRows) {
+            await connection.rollback();
+            return interaction.update({
+                content: 'Your balance changed before the purchase could complete. No money was taken.',
+                embeds: [],
+                components: []
+            });
+        }
+
+        const [businessUpdate] = await connection.query(
+            `UPDATE galrp_businesses
+             SET owner_character_id = ?,
+                 owner_discord_id = ?,
+                 for_sale = 0
+             WHERE business_key = ?
+               AND for_sale = 1
+               AND owner_character_id IS NULL`,
+            [characterId, discordId, businessKey]
+        );
+
+        if (!businessUpdate.affectedRows) {
+            await connection.rollback();
+            return interaction.update({
+                content: 'Someone else purchased that business first. No money was taken.',
+                embeds: [],
+                components: []
+            });
+        }
+
+        await connection.query(
+            `INSERT INTO galrp_business_employees
+                (business_key, character_id, discord_id, employee_rank, on_duty)
+             VALUES (?, ?, ?, 'owner', 0)
+             ON DUPLICATE KEY UPDATE
+                discord_id = VALUES(discord_id),
+                employee_rank = 'owner',
+                on_duty = 0`,
+            [businessKey, characterId, discordId]
+        );
+
+        await connection.query(
+            `INSERT INTO galrp_business_transactions
+                (business_key, character_id, transaction_type, amount, description)
+             VALUES (?, ?, 'purchase', ?, 'Business purchased through Discord')`,
+            [businessKey, characterId, price]
+        );
+
+        await connection.commit();
+
+        const character = characters[0];
+        return interaction.update({
+            content:
+                `✅ **${character.first_name} ${character.last_name}** now owns **${business.name}**.\n` +
+                `Purchase price: **$${price.toLocaleString()}**\n\n` +
+                'Every vehicle already registered to this business is included.',
+            embeds: [],
+            components: []
+        });
+    } catch (error) {
+        await connection.rollback();
+        console.error('Business purchase error:', error);
+
+        const response = {
+            content: 'The business purchase failed because of a database error. No completed transaction was kept.',
+            embeds: [],
+            components: []
+        };
+
+        if (interaction.replied || interaction.deferred) {
+            return interaction.followUp({ content: response.content, flags: MessageFlags.Ephemeral });
+        }
+        return interaction.update(response);
+    } finally {
+        connection.release();
+    }
+}
+
+
 async function purchaseVehicleForUser(interaction, model) {
     const discordId = interaction.user.id;
     const member = await interaction.guild.members.fetch(discordId);
@@ -1647,8 +1968,19 @@ async function purchaseVehicleForUser(interaction, model) {
 
     const vehicle = vehicleRows[0];
 
-    const vehicleCategory = String(vehicle.category || 'sedan').toLowerCase().trim();
+    const vehicleCategory = String(vehicle.category || 'car').toLowerCase().trim();
     const isPushBike = vehicleCategory === 'pushbike';
+
+    if (vehicleCategory === 'taxi') {
+        const ownsTaxiBusiness = await ownsBusinessType(discordId, 'taxi');
+
+        if (!ownsTaxiBusiness) {
+            return interaction.reply({
+                content: 'You cannot buy a taxi because you do not own the Taxi business. Use `/business` to check whether Downtown Taxi is available.',
+                flags: MessageFlags.Ephemeral
+            });
+        }
+    }
 
     // Push bikes can be purchased without a Driver Licence.
     if (!isPushBike && !memberHasDriversLicence(member)) {
@@ -2275,6 +2607,7 @@ const commands = [
                     { name: 'Taxi Driver Permit', value: 'taxi' },
                     { name: 'Passenger Endorsement', value: 'bus' },
                     { name: 'Tow Operator Permit', value: 'tow' },
+                    { name: 'Airport Security Pass', value: 'airport' },
                     { name: 'Hazmat / Tanker Endorsement', value: 'tanker' }
                 )
         ),
@@ -2287,6 +2620,7 @@ const commands = [
         .setDescription('Buy a role')
         .addStringOption(o => o.setName('name').setDescription('Role name').setRequired(true)),
     new SlashCommandBuilder().setName('vehicleclasses').setDescription('View vehicle shop sections and licence rules'),
+    new SlashCommandBuilder().setName('business').setDescription('View and purchase available businesses'),
     new SlashCommandBuilder()
         .setName('addvehicle')
         .setDescription('Admin: add or update a shop vehicle')
@@ -2295,20 +2629,16 @@ const commands = [
         .addIntegerOption(o => o.setName('price').setDescription('Vehicle price').setRequired(true))
         .addStringOption(o => o.setName('section').setDescription('Shop section').setRequired(true)
             .addChoices(
-                { name: 'Push Bikes', value: 'pushbike' },
-                { name: 'Sedan', value: 'sedan' },
-                { name: 'Coupe', value: 'coupe' },
-                { name: 'SUV', value: 'suv' },
-                { name: 'Truck', value: 'truck' },
-                { name: 'Offroad', value: 'offroad' },
-                { name: 'Van', value: 'van' },
-                { name: 'Motorcycle', value: 'motorcycle' },
-                { name: 'Marine', value: 'marine' },
-                { name: 'Aircraft', value: 'aircraft' },
-                { name: 'Taxi', value: 'taxi' },
-                { name: 'Bus (CDL)', value: 'bus' },
+                { name: 'Cars', value: 'car' },
+                { name: 'Motorcycles', value: 'bike' },
+                { name: 'Vans', value: 'van' },
+                { name: 'Light Trucks - No CDL', value: 'light_truck' },
+                { name: 'Heavy Trucks - CDL', value: 'heavy_truck' },
+                { name: 'Taxi - Accreditation', value: 'taxi' },
+                { name: 'Buses - Bus Endorsement', value: 'bus' },
                 { name: 'Utility / Tow', value: 'utility' },
-                { name: 'Emergency', value: 'emergency' }
+                { name: 'Emergency', value: 'emergency' },
+                { name: 'Airport', value: 'airport' }
             ))
         .addStringOption(o => o.setName('roleid').setDescription('Optional required Discord role ID').setRequired(false)),
     new SlashCommandBuilder().setName('shop').setDescription('View vehicles'),
@@ -2391,8 +2721,67 @@ client.on('interactionCreate', async interaction => {
                 return assignCadLicenceToCharacter(interaction, licence, characterId);
             }
 
+            if (interaction.customId === 'business_select') {
+                return showBusinessCharacterChoice(interaction, interaction.values[0]);
+            }
+
+            if (interaction.customId.startsWith('business_character:')) {
+                const businessKey = interaction.customId.split(':')[1];
+                const characterId = interaction.values[0];
+
+                const [businessRows] = await pool.query(
+                    `SELECT name, purchase_price
+                     FROM galrp_businesses
+                     WHERE business_key = ? AND for_sale = 1
+                     LIMIT 1`,
+                    [businessKey]
+                );
+
+                if (!businessRows.length) {
+                    return interaction.update({
+                        content: 'That business is no longer available.',
+                        embeds: [],
+                        components: []
+                    });
+                }
+
+                const [characterRows] = await pool.query(
+                    `SELECT first_name, last_name
+                     FROM galrp_characters
+                     WHERE character_id = ? AND owner_discord = ? AND is_deleted = 0
+                     LIMIT 1`,
+                    [characterId, interaction.user.id]
+                );
+
+                if (!characterRows.length) {
+                    return interaction.update({
+                        content: 'That character could not be verified.',
+                        embeds: [],
+                        components: []
+                    });
+                }
+
+                const business = businessRows[0];
+                const character = characterRows[0];
+
+                return interaction.update({
+                    content:
+                        `Buy **${business.name}** for **$${Number(business.purchase_price).toLocaleString()}**?\n` +
+                        `Owner character: **${character.first_name} ${character.last_name}** (\`${characterId}\`)`,
+                    embeds: [],
+                    components: [buildBusinessConfirmButtons(businessKey, characterId)]
+                });
+            }
+
             if (interaction.customId === 'shop_category_select') {
                 const category = interaction.values[0];
+
+                if (category === 'taxi' && !(await ownsBusinessType(interaction.user.id, 'taxi'))) {
+                    return interaction.reply({
+                        content: 'The Taxi shop is restricted to the owner of Downtown Taxi. Use `/business` to view available businesses.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
                 const member = await interaction.guild.members.fetch(interaction.user.id);
 
                 const vehicles = await getAvailableVehiclesForMember(member, category);
@@ -2606,6 +2995,19 @@ client.on('interactionCreate', async interaction => {
                 const result = await placeAuctionBid(auction, interaction.user.id, amount);
 
                 return interaction.reply({ content: result.message, flags: MessageFlags.Ephemeral });
+            }
+
+            if (interaction.customId.startsWith('business_confirm:')) {
+                const [, businessKey, characterId] = interaction.customId.split(':');
+                return purchaseBusinessForCharacter(interaction, businessKey, characterId);
+            }
+
+            if (interaction.customId === 'business_cancel') {
+                return interaction.update({
+                    content: 'Business purchase cancelled.',
+                    embeds: [],
+                    components: []
+                });
             }
 
             if (interaction.customId.startsWith('shop_buy_confirm:')) {
@@ -2910,6 +3312,18 @@ client.on('interactionCreate', async interaction => {
                     `Category: \`${category}\`\n` +
                     `Class: \`${vehicleClass || 'none'}\`\n` +
                     `Required Licence: \`${requiredLicence || 'none'}\``,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        if (interaction.commandName === 'business') {
+            const available = await getAvailableBusinesses();
+            const owned = await getOwnedBusinesses(discordId);
+            const select = buildBusinessSelect(available);
+
+            return interaction.reply({
+                embeds: [buildBusinessEmbed(available, owned)],
+                components: select ? [select] : [],
                 flags: MessageFlags.Ephemeral
             });
         }
