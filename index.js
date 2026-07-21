@@ -163,9 +163,38 @@ const COMMAND_CHANNELS = {
     buylicence: process.env.CHANNEL_PURCHASE,
     addvehicle: process.env.CHANNEL_PURCHASE,
     vehicleclasses: process.env.CHANNEL_PURCHASE,
-    business: process.env.CHANNEL_BUSINESS || process.env.CHANNEL_PURCHASE,
+    business: process.env.CHANNEL_BUSINESS,
 
 };
+
+function normaliseChannelName(name) {
+    return String(name || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '');
+}
+
+function resolveCommandChannel(interaction) {
+    if (interaction.commandName !== 'business') {
+        return COMMAND_CHANNELS[interaction.commandName] || null;
+    }
+
+    const configured = String(process.env.CHANNEL_BUSINESS || '').trim();
+    if (configured) return configured;
+
+    // Railway sometimes does not expose a newly added variable to the running
+    // deployment. In that case, allow /business only in a channel whose
+    // normalised name is exactly "business".
+    const currentChannelName = normaliseChannelName(interaction.channel?.name);
+    if (currentChannelName === 'business') return interaction.channelId;
+
+    const businessChannel = interaction.guild?.channels?.cache?.find(channel =>
+        channel && channel.isTextBased && channel.isTextBased()
+        && normaliseChannelName(channel.name) === 'business'
+    );
+
+    return businessChannel?.id || null;
+}
+
 
 const STRAIGHT_TO_AUCTION_ROLE_IDS = (process.env.STRAIGHT_TO_AUCTION_ROLE_IDS || '')
     .split(',')
@@ -2673,6 +2702,7 @@ const commands = [
 
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
+    console.log(`Business channel setting: ${process.env.CHANNEL_BUSINESS || 'channel-name fallback (business)'}`);
     console.log(
         `Driver licence access: ${DRIVER_LICENCE_ROLE_IDS.length
             ? `${DRIVER_LICENCE_ROLE_IDS.length} configured role ID(s)`
@@ -3032,7 +3062,7 @@ client.on('interactionCreate', async interaction => {
 
         if (!interaction.isChatInputCommand()) return;
 
-        const requiredChannel = COMMAND_CHANNELS[interaction.commandName];
+        const requiredChannel = resolveCommandChannel(interaction);
         if (requiredChannel && interaction.channelId !== requiredChannel) {
             return interaction.reply({
                 content: `You can only use \`/${interaction.commandName}\` in <#${requiredChannel}>.`,
