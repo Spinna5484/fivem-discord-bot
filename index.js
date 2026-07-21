@@ -536,7 +536,7 @@ async function assignCadLicenceToCharacter(interaction, licence, characterId) {
     const [existing] = await pool.query(
         `SELECT id, status, type, DATE_FORMAT(expiration, '%Y-%m-%d') AS expiration
          FROM galrp_character_licenses
-         WHERE character_id = ? AND type = ?
+         WHERE BINARY character_id = BINARY ? AND type = ?
          LIMIT 1`,
         [character.character_id, cadConfig.cadType]
     );
@@ -969,7 +969,7 @@ async function buildImpoundsText(discordId) {
     const [rows] = await pool.query(
         `SELECT plate, vehicle_model, fee, reason, impound_method
          FROM bot_impounds
-         WHERE owner_discord_id = ? AND status = 'impounded' AND direct_auction = 0
+         WHERE BINARY owner_discord_id = BINARY ? AND status = 'impounded' AND direct_auction = 0
          ORDER BY impounded_at DESC
          LIMIT 20`,
         [discordId]
@@ -1026,7 +1026,7 @@ async function getOutstandingBills(discordId) {
     const [rows] = await pool.query(
         `SELECT id, plate, reason, amount, paid_amount, outstanding_amount, status, officer_name, issued_at
          FROM bot_parking_fines
-         WHERE owner_discord_id = ?
+         WHERE BINARY owner_discord_id = BINARY ?
            AND status IN ('unpaid', 'part_paid')
            AND outstanding_amount > 0
          ORDER BY issued_at DESC`,
@@ -1042,7 +1042,7 @@ async function buildBillsEmbed(discordId, view = 'outstanding') {
     const [rows] = await pool.query(
         `SELECT id, plate, reason, amount, paid_amount, outstanding_amount, status, officer_name, issued_at, paid_at
          FROM bot_parking_fines
-         WHERE owner_discord_id = ?
+         WHERE BINARY owner_discord_id = BINARY ?
            AND ${
                isPaidView
                    ? "status = 'paid'"
@@ -1337,7 +1337,7 @@ async function payAllParkingBills(discordId) {
         const [bills] = await connection.query(
             `SELECT *
              FROM bot_parking_fines
-             WHERE owner_discord_id = ?
+             WHERE BINARY owner_discord_id = BINARY ?
                AND status IN ('unpaid', 'part_paid')
                AND outstanding_amount > 0
              ORDER BY issued_at ASC
@@ -1526,7 +1526,7 @@ async function processOverdueBills() {
             const [bills] = await pool.query(
                 `SELECT *
                  FROM bot_parking_fines
-                 WHERE owner_discord_id = ?
+                 WHERE BINARY owner_discord_id = BINARY ?
                    AND status IN ('unpaid', 'part_paid')
                    AND outstanding_amount > 0
                  ORDER BY issued_at ASC`,
@@ -1560,7 +1560,7 @@ async function processOverdueBills() {
                 await pool.query(
                     `UPDATE bot_parking_fines
                      SET warning_sent_at = ?, warrant_status = 'warning'
-                     WHERE owner_discord_id = ?
+                     WHERE BINARY owner_discord_id = BINARY ?
                        AND status IN ('unpaid', 'part_paid')
                        AND outstanding_amount > 0
                        AND warning_sent_at IS NULL`,
@@ -1572,7 +1572,7 @@ async function processOverdueBills() {
                 const [pending] = await pool.query(
                     `SELECT id
                      FROM bot_parking_fines
-                     WHERE owner_discord_id = ?
+                     WHERE BINARY owner_discord_id = BINARY ?
                        AND status IN ('unpaid', 'part_paid')
                        AND outstanding_amount > 0
                        AND warrant_status NOT IN ('pending', 'issued')
@@ -1602,7 +1602,7 @@ async function processOverdueBills() {
                 await pool.query(
                     `UPDATE bot_parking_fines
                      SET warrant_status = 'pending', warrant_sent_at = ?
-                     WHERE owner_discord_id = ?
+                     WHERE BINARY owner_discord_id = BINARY ?
                        AND status IN ('unpaid', 'part_paid')
                        AND outstanding_amount > 0
                        AND warrant_status NOT IN ('pending', 'issued')`,
@@ -1635,8 +1635,10 @@ async function getOwnedBusinesses(discordId) {
                 b.bank_balance, b.owner_character_id,
                 CONCAT(c.first_name, ' ', c.last_name) AS owner_character_name
          FROM galrp_businesses b
-         LEFT JOIN galrp_characters c ON c.character_id = b.owner_character_id
-         WHERE b.owner_discord_id = ? AND b.for_sale = 0
+         LEFT JOIN galrp_characters c
+           ON BINARY c.character_id = BINARY b.owner_character_id
+         WHERE BINARY b.owner_discord_id = BINARY ?
+           AND b.for_sale = 0
          ORDER BY b.name ASC`,
         [discordId]
     );
@@ -1647,7 +1649,8 @@ async function getDiscordCharacters(discordId) {
     const [rows] = await pool.query(
         `SELECT character_id, first_name, last_name, character_status
          FROM galrp_characters
-         WHERE owner_discord = ? AND is_deleted = 0
+         WHERE BINARY owner_discord = BINARY ?
+           AND is_deleted = 0
          ORDER BY created_at ASC`,
         [discordId]
     );
@@ -1658,8 +1661,8 @@ async function ownsBusinessType(discordId, businessType) {
     const [rows] = await pool.query(
         `SELECT 1
          FROM galrp_businesses
-         WHERE owner_discord_id = ?
-           AND business_type = ?
+         WHERE BINARY owner_discord_id = BINARY ?
+           AND BINARY business_type = BINARY ?
            AND for_sale = 0
          LIMIT 1`,
         [discordId, businessType]
@@ -1740,7 +1743,7 @@ async function showBusinessCharacterChoice(interaction, businessKey) {
     const [businessRows] = await pool.query(
         `SELECT business_key, name, business_type, purchase_price
          FROM galrp_businesses
-         WHERE business_key = ? AND for_sale = 1 AND owner_character_id IS NULL
+         WHERE BINARY business_key = BINARY ? AND for_sale = 1 AND owner_character_id IS NULL
          LIMIT 1`,
         [businessKey]
     );
@@ -1793,7 +1796,9 @@ async function purchaseBusinessForCharacter(interaction, businessKey, characterI
         const [characters] = await connection.query(
             `SELECT character_id, first_name, last_name
              FROM galrp_characters
-             WHERE character_id = ? AND owner_discord = ? AND is_deleted = 0
+             WHERE BINARY character_id = BINARY ?
+               AND BINARY owner_discord = BINARY ?
+               AND is_deleted = 0
              LIMIT 1
              FOR UPDATE`,
             [characterId, discordId]
@@ -1811,7 +1816,7 @@ async function purchaseBusinessForCharacter(interaction, businessKey, characterI
         const [businessRows] = await connection.query(
             `SELECT *
              FROM galrp_businesses
-             WHERE business_key = ?
+             WHERE BINARY business_key = BINARY ?
              LIMIT 1
              FOR UPDATE`,
             [businessKey]
@@ -1831,7 +1836,8 @@ async function purchaseBusinessForCharacter(interaction, businessKey, characterI
         const [characterOwned] = await connection.query(
             `SELECT name
              FROM galrp_businesses
-             WHERE owner_character_id = ? AND for_sale = 0
+             WHERE BINARY owner_character_id = BINARY ?
+               AND for_sale = 0
              LIMIT 1
              FOR UPDATE`,
             [characterId]
@@ -1889,7 +1895,7 @@ async function purchaseBusinessForCharacter(interaction, businessKey, characterI
              SET owner_character_id = ?,
                  owner_discord_id = ?,
                  for_sale = 0
-             WHERE business_key = ?
+             WHERE BINARY business_key = BINARY ?
                AND for_sale = 1
                AND owner_character_id IS NULL`,
             [characterId, discordId, businessKey]
@@ -2732,7 +2738,7 @@ client.on('interactionCreate', async interaction => {
                 const [businessRows] = await pool.query(
                     `SELECT name, purchase_price
                      FROM galrp_businesses
-                     WHERE business_key = ? AND for_sale = 1
+                     WHERE BINARY business_key = BINARY ? AND for_sale = 1
                      LIMIT 1`,
                     [businessKey]
                 );
@@ -2748,7 +2754,9 @@ client.on('interactionCreate', async interaction => {
                 const [characterRows] = await pool.query(
                     `SELECT first_name, last_name
                      FROM galrp_characters
-                     WHERE character_id = ? AND owner_discord = ? AND is_deleted = 0
+                     WHERE BINARY character_id = BINARY ?
+               AND BINARY owner_discord = BINARY ?
+               AND is_deleted = 0
                      LIMIT 1`,
                     [characterId, interaction.user.id]
                 );
@@ -3401,7 +3409,7 @@ client.on('interactionCreate', async interaction => {
             const [impoundList] = await pool.query(
                 `SELECT plate, vehicle_model, fee, reason, impound_method, release_at
                  FROM bot_impounds
-                 WHERE owner_discord_id = ? AND status = 'impounded' AND direct_auction = 0
+                 WHERE BINARY owner_discord_id = BINARY ? AND status = 'impounded' AND direct_auction = 0
                  ORDER BY impounded_at DESC`,
                 [discordId]
             );
@@ -3451,7 +3459,7 @@ client.on('interactionCreate', async interaction => {
 
             const [impoundRows] = await pool.query(
                 `SELECT * FROM bot_impounds
-                 WHERE owner_discord_id = ? AND plate = ? AND status = 'impounded'
+                 WHERE BINARY owner_discord_id = BINARY ? AND plate = ? AND status = 'impounded'
                  LIMIT 1`,
                 [discordId, plate]
             );
