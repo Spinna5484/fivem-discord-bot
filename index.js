@@ -236,17 +236,42 @@ function generatePlate(length = 8) {
 
 const VEHICLE_CATEGORIES = {
     pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: null, required_licence: null },
-    car: { label: 'Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: null },
+    car: { label: 'General Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: 'driver' },
+    sedan: { label: 'Sedans', emoji: '🚘', category: 'sedan', vehicle_class: null, required_licence: 'driver' },
+    coupe: { label: 'Coupes', emoji: '🏎️', category: 'coupe', vehicle_class: null, required_licence: 'driver' },
+    suv: { label: 'SUVs', emoji: '🚙', category: 'suv', vehicle_class: null, required_licence: 'driver' },
+    offroad: { label: 'Offroad', emoji: '🛻', category: 'offroad', vehicle_class: null, required_licence: 'driver' },
     bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: 'motorcycle' },
-    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
-    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
+    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: 'driver' },
+    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: 'driver' },
     heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'cdl' },
     taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi' },
     bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus' },
-    utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: null },
-    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null },
-    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport' }
+    utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: 'tow' },
+    marine: { label: 'Marine', emoji: '🚤', category: 'marine', vehicle_class: null, required_licence: 'boat' },
+    aircraft: { label: 'Aircraft', emoji: '✈️', category: 'aircraft', vehicle_class: null, required_licence: 'pilot' },
+    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: 'driver' }
 };
+
+function getEffectiveVehicleLicence(vehicle, section = null) {
+    const stored = String(vehicle?.required_licence || '').toLowerCase().trim();
+    if (stored) return stored;
+
+    const category = String(vehicle?.category || '').toLowerCase().trim();
+    const vehicleClass = String(vehicle?.vehicle_class || '').toLowerCase().trim();
+
+    if (category === 'pushbike') return null;
+    if (category === 'bike') return 'motorcycle';
+    if (category === 'marine') return 'boat';
+    if (category === 'aircraft') return 'pilot';
+    if (category === 'taxi') return 'taxi';
+    if (category === 'bus') return 'bus';
+    if (category === 'utility') return 'tow';
+    if (category === 'truck' && vehicleClass === 'heavy') return 'cdl';
+
+    const sectionData = section ? getCategoryData(section) : null;
+    return sectionData?.required_licence || 'driver';
+}
 
 const SHOP_PAGE_SIZE = 10;
 
@@ -810,7 +835,7 @@ function buildVehicleListEmbed(section, vehicles, page = 0) {
                 `Model: \`${vehicle.vehicle_model}\`\n` +
                 `Price: **$${vehicle.price}**\n` +
                 `Class: **${vehicle.vehicle_class || 'None'}**\n` +
-                `Licence: **${vehicle.required_licence || 'None'}**`,
+                `Licence: **${getEffectiveVehicleLicence(vehicle, section) || 'None'}**`,
             inline: true
         });
     }
@@ -870,7 +895,7 @@ function buildPurchaseConfirm(vehicle) {
             { name: 'Model', value: `\`${vehicle.vehicle_model}\``, inline: true },
             { name: 'Price', value: `$${vehicle.price}`, inline: true },
             { name: 'Category', value: `${vehicle.category || 'car'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
-            { name: 'Licence', value: vehicle.required_licence ? `Required: ${vehicle.required_licence}` : 'None', inline: true }
+            { name: 'Licence', value: getEffectiveVehicleLicence(vehicle) ? `Required: ${getEffectiveVehicleLicence(vehicle)}` : 'None', inline: true }
         )
         .setTimestamp(new Date());
 
@@ -2005,6 +2030,7 @@ async function purchaseVehicleForUser(interaction, model) {
 
     const vehicleCategory = String(vehicle.category || 'car').toLowerCase().trim();
     const isPushBike = vehicleCategory === 'pushbike';
+    const effectiveLicence = getEffectiveVehicleLicence(vehicle);
 
     if (vehicleCategory === 'taxi') {
         const ownsTaxiBusiness = await ownsBusinessType(discordId, 'taxi');
@@ -2017,17 +2043,18 @@ async function purchaseVehicleForUser(interaction, model) {
         }
     }
 
-    // Push bikes can be purchased without a Driver Licence.
-    if (!isPushBike && !memberHasDriversLicence(member)) {
+    // Road vehicles require the Driver Licence Discord role. Boats, aircraft,
+    // motorcycles and business vehicles use their own licence/permit instead.
+    if (effectiveLicence === 'driver' && !memberHasDriversLicence(member)) {
         return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
     }
 
-    if (vehicle.required_licence) {
-        const allowed = await hasLicence(discordId, vehicle.required_licence);
+    if (effectiveLicence) {
+        const allowed = await hasLicence(discordId, effectiveLicence);
         if (!allowed) {
-            const licenceData = LICENCE_SHOP[vehicle.required_licence];
+            const licenceData = LICENCE_SHOP[effectiveLicence];
             return interaction.reply({
-                content: `You need **${licenceData ? licenceData.label : vehicle.required_licence}** to buy this vehicle. Use /licences first.`,
+                content: `You need **${licenceData ? licenceData.label : effectiveLicence}** to buy this vehicle. Use /licences first.`,
                 flags: MessageFlags.Ephemeral
             });
         }
