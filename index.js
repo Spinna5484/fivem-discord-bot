@@ -299,6 +299,9 @@ async function ensureVehicleShopColumns() {
         await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN trade_in_value BIGINT NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN character_id VARCHAR(32) NULL`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN citizen_id VARCHAR(32) NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN registration_status VARCHAR(20) NOT NULL DEFAULT 'PENDING'`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN registration_expiration DATE NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN registration_last_notice DATE NULL`).catch(() => {});
     } catch (error) {
         console.error('Vehicle shop schema ensure error:', error);
     }
@@ -2270,8 +2273,8 @@ async function purchaseVehicleForUser(interaction, model, tradeFleetId = null, s
         await connection.query(
             `INSERT INTO bot_vehicle_purchases
              (discord_id, license, character_id, citizen_id, vehicle_model, plate, claimed, claim_code, claimed_at,
-              business_key, trade_in_plate, trade_in_value)
-             VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?)`,
+              business_key, trade_in_plate, trade_in_value, registration_status, registration_expiration, registration_last_notice)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?, 'PENDING', DATE_ADD(CURDATE(), INTERVAL 2 YEAR), NULL)`,
             [
                 discordId,
                 linkRows[0].license,
