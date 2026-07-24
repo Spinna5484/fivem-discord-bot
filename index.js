@@ -40,6 +40,19 @@ const SHERIFF_ROLE_ID = process.env.SHERIFF_ROLE_ID || '';
 const DRIVER_LICENCE_PRICE = Number(process.env.DRIVER_LICENCE_PRICE || 2500);
 
 
+// Business fleet trade-in settings.
+// 40 means the undamaged vehicle is worth 40% of its current shop price.
+const BUSINESS_TRADE_IN_PERCENT = Math.max(0, Math.min(100, Number(process.env.BUSINESS_TRADE_IN_PERCENT || 40)));
+const BUSINESS_TRADE_IN_MIN_CONDITION = Math.max(0.10, Math.min(1.0, Number(process.env.BUSINESS_TRADE_IN_MIN_CONDITION || 0.10)));
+
+// Categories that are purchased for a business instead of as a private vehicle.
+// More mappings can be added as each business vehicle shop is enabled.
+const BUSINESS_CATEGORY_TYPES = {
+    taxi: 'taxi',
+    bus: 'bus'
+};
+
+
 const CAD_LICENCE_CONFIG = {
     driver: {
         label: 'Driver Licence',
@@ -236,42 +249,17 @@ function generatePlate(length = 8) {
 
 const VEHICLE_CATEGORIES = {
     pushbike: { label: 'Push Bikes', emoji: '🚲', category: 'pushbike', vehicle_class: null, required_licence: null },
-    car: { label: 'General Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: 'driver' },
-    sedan: { label: 'Sedans', emoji: '🚘', category: 'sedan', vehicle_class: null, required_licence: 'driver' },
-    coupe: { label: 'Coupes', emoji: '🏎️', category: 'coupe', vehicle_class: null, required_licence: 'driver' },
-    suv: { label: 'SUVs', emoji: '🚙', category: 'suv', vehicle_class: null, required_licence: 'driver' },
-    offroad: { label: 'Offroad', emoji: '🛻', category: 'offroad', vehicle_class: null, required_licence: 'driver' },
+    car: { label: 'Cars', emoji: '🚗', category: 'car', vehicle_class: null, required_licence: null },
     bike: { label: 'Motorcycles', emoji: '🏍️', category: 'bike', vehicle_class: null, required_licence: 'motorcycle' },
-    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: 'driver' },
-    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: 'driver' },
+    van: { label: 'Vans', emoji: '🚐', category: 'van', vehicle_class: null, required_licence: null },
+    light_truck: { label: 'Light Trucks', emoji: '🚚', category: 'truck', vehicle_class: 'light', required_licence: null },
     heavy_truck: { label: 'Heavy Trucks (CDL)', emoji: '🚛', category: 'truck', vehicle_class: 'heavy', required_licence: 'cdl' },
     taxi: { label: 'Taxi', emoji: '🚕', category: 'taxi', vehicle_class: null, required_licence: 'taxi' },
     bus: { label: 'Buses', emoji: '🚌', category: 'bus', vehicle_class: null, required_licence: 'bus' },
-    utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: 'tow' },
-    marine: { label: 'Marine', emoji: '🚤', category: 'marine', vehicle_class: null, required_licence: 'boat' },
-    aircraft: { label: 'Aircraft', emoji: '✈️', category: 'aircraft', vehicle_class: null, required_licence: 'pilot' },
-    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: 'driver' }
+    utility: { label: 'Utility / Tow', emoji: '🚜', category: 'utility', vehicle_class: null, required_licence: null },
+    emergency: { label: 'Emergency', emoji: '🚓', category: 'emergency', vehicle_class: null, required_licence: null },
+    airport: { label: 'Airport', emoji: '✈️', category: 'airport', vehicle_class: null, required_licence: 'airport' }
 };
-
-function getEffectiveVehicleLicence(vehicle, section = null) {
-    const stored = String(vehicle?.required_licence || '').toLowerCase().trim();
-    if (stored) return stored;
-
-    const category = String(vehicle?.category || '').toLowerCase().trim();
-    const vehicleClass = String(vehicle?.vehicle_class || '').toLowerCase().trim();
-
-    if (category === 'pushbike') return null;
-    if (category === 'bike') return 'motorcycle';
-    if (category === 'marine') return 'boat';
-    if (category === 'aircraft') return 'pilot';
-    if (category === 'taxi') return 'taxi';
-    if (category === 'bus') return 'bus';
-    if (category === 'utility') return 'tow';
-    if (category === 'truck' && vehicleClass === 'heavy') return 'cdl';
-
-    const sectionData = section ? getCategoryData(section) : null;
-    return sectionData?.required_licence || 'driver';
-}
 
 const SHOP_PAGE_SIZE = 10;
 
@@ -306,6 +294,11 @@ async function ensureVehicleShopColumns() {
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_new TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN is_popular TINYINT(1) NOT NULL DEFAULT 0`).catch(() => {});
         await pool.query(`ALTER TABLE bot_vehicle_shop ADD COLUMN vehicle_class VARCHAR(50) NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN business_key VARCHAR(50) NULL DEFAULT NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN trade_in_plate VARCHAR(20) NULL DEFAULT NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN trade_in_value BIGINT NOT NULL DEFAULT 0`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN character_id VARCHAR(32) NULL`).catch(() => {});
+        await pool.query(`ALTER TABLE bot_vehicle_purchases ADD COLUMN citizen_id VARCHAR(32) NULL`).catch(() => {});
     } catch (error) {
         console.error('Vehicle shop schema ensure error:', error);
     }
@@ -835,7 +828,7 @@ function buildVehicleListEmbed(section, vehicles, page = 0) {
                 `Model: \`${vehicle.vehicle_model}\`\n` +
                 `Price: **$${vehicle.price}**\n` +
                 `Class: **${vehicle.vehicle_class || 'None'}**\n` +
-                `Licence: **${getEffectiveVehicleLicence(vehicle, section) || 'None'}**`,
+                `Licence: **${vehicle.required_licence || 'None'}**`,
             inline: true
         });
     }
@@ -887,27 +880,49 @@ function buildVehicleSelect(section, vehicles, page = 0) {
     );
 }
 
+function businessTypeForVehicle(vehicle) {
+    return BUSINESS_CATEGORY_TYPES[String(vehicle.category || '').toLowerCase().trim()] || null;
+}
+
 function buildPurchaseConfirm(vehicle) {
+    const businessType = businessTypeForVehicle(vehicle);
     const embed = new EmbedBuilder()
         .setTitle(`Confirm Purchase • ${vehicle.label || vehicle.vehicle_model}`)
         .setColor(5763719)
         .addFields(
             { name: 'Model', value: `\`${vehicle.vehicle_model}\``, inline: true },
-            { name: 'Price', value: `$${vehicle.price}`, inline: true },
+            { name: 'Price', value: `$${Number(vehicle.price).toLocaleString()}`, inline: true },
             { name: 'Category', value: `${vehicle.category || 'car'}${vehicle.vehicle_class ? ' / ' + vehicle.vehicle_class : ''}`, inline: true },
-            { name: 'Licence', value: getEffectiveVehicleLicence(vehicle) ? `Required: ${getEffectiveVehicleLicence(vehicle)}` : 'None', inline: true }
+            { name: 'Licence', value: vehicle.required_licence ? `Required: ${vehicle.required_licence}` : 'None', inline: true },
+            { name: 'Ownership', value: businessType ? `Business fleet (${businessType})` : 'Private vehicle', inline: true }
         )
         .setTimestamp(new Date());
 
-    if (vehicle.image_url) {
-        embed.setImage(vehicle.image_url);
+    if (businessType) {
+        embed.setDescription(
+            'This vehicle will be tagged for your business fleet. You may buy it normally or trade in one existing company vehicle for a discount.'
+        );
     }
+
+    if (vehicle.image_url) embed.setImage(vehicle.image_url);
 
     const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
             .setCustomId(`shop_buy_confirm:${vehicle.vehicle_model}`)
-            .setLabel('Buy Vehicle')
-            .setStyle(ButtonStyle.Success),
+            .setLabel(businessType ? 'Buy Without Trade-In' : 'Buy Vehicle')
+            .setStyle(ButtonStyle.Success)
+    );
+
+    if (businessType) {
+        row.addComponents(
+            new ButtonBuilder()
+                .setCustomId(`shop_trade_start:${vehicle.vehicle_model}`)
+                .setLabel('Trade In Fleet Vehicle')
+                .setStyle(ButtonStyle.Primary)
+        );
+    }
+
+    row.addComponents(
         new ButtonBuilder()
             .setCustomId('shop_buy_cancel')
             .setLabel('Cancel')
@@ -915,6 +930,111 @@ function buildPurchaseConfirm(vehicle) {
     );
 
     return { embed, row };
+}
+
+async function getOwnedBusinessForVehicle(discordId, vehicle, connection = pool) {
+    const businessType = businessTypeForVehicle(vehicle);
+    if (!businessType) return null;
+
+    const [rows] = await connection.query(
+        `SELECT business_key, name, business_type, owner_character_id
+         FROM galrp_businesses
+         WHERE BINARY owner_discord_id = BINARY ?
+           AND BINARY business_type = BINARY ?
+           AND for_sale = 0
+         LIMIT 1`,
+        [discordId, businessType]
+    );
+    return rows[0] || null;
+}
+
+function fleetConditionMultiplier(row) {
+    const engine = Math.max(0, Math.min(1000, Number(row.engine ?? 1000))) / 1000;
+    const body = Math.max(0, Math.min(1000, Number(row.body ?? 1000))) / 1000;
+    return Math.max(BUSINESS_TRADE_IN_MIN_CONDITION, (engine + body) / 2);
+}
+
+function calculateTradeInValue(row) {
+    const shopPrice = Math.max(0, Number(row.shop_price || 0));
+    const baseValue = Math.floor(shopPrice * (BUSINESS_TRADE_IN_PERCENT / 100));
+    return Math.max(0, Math.floor(baseValue * fleetConditionMultiplier(row)));
+}
+
+async function getBusinessFleetTradeOptions(discordId, vehicle) {
+    const business = await getOwnedBusinessForVehicle(discordId, vehicle);
+    if (!business) return { business: null, vehicles: [] };
+
+    const [rows] = await pool.query(
+        `SELECT f.id, f.plate, f.vehicle_model, f.status, f.stored, f.engine, f.body,
+                COALESCE(s.price, 0) AS shop_price,
+                COALESCE(s.label, f.vehicle_model) AS vehicle_label
+         FROM galrp_business_fleet f
+         LEFT JOIN bot_vehicle_shop s
+           ON LOWER(s.vehicle_model) = LOWER(f.vehicle_model)
+         WHERE BINARY f.business_key = BINARY ?
+           AND f.status <> 'impounded'
+         ORDER BY f.vehicle_model, f.plate
+         LIMIT 25`,
+        [business.business_key]
+    );
+
+    return { business, vehicles: rows.map(row => ({ ...row, trade_value: calculateTradeInValue(row) })) };
+}
+
+function buildFleetTradeSelect(newVehicle, business, fleet) {
+    const embed = new EmbedBuilder()
+        .setTitle(`Choose Trade-In • ${business.name}`)
+        .setDescription(
+            `New vehicle: **${newVehicle.label || newVehicle.vehicle_model}** ($${Number(newVehicle.price).toLocaleString()})\n` +
+            `Trade value is ${BUSINESS_TRADE_IN_PERCENT}% of the old vehicle's current shop price, adjusted for engine and body condition.`
+        )
+        .setColor(3447003)
+        .setTimestamp(new Date());
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId(`shop_trade_select:${newVehicle.vehicle_model}`)
+        .setPlaceholder('Choose a business vehicle to trade in')
+        .addOptions(fleet.map(row => ({
+            label: `${row.vehicle_label} [${row.plate}]`.slice(0, 100),
+            description: `Trade $${Number(row.trade_value).toLocaleString()} • ${row.status} • ${Math.round(fleetConditionMultiplier(row) * 100)}% condition`.slice(0, 100),
+            value: String(row.id)
+        })));
+
+    return {
+        embed,
+        components: [
+            new ActionRowBuilder().addComponents(menu),
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('shop_buy_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+            )
+        ]
+    };
+}
+
+function buildTradeConfirm(newVehicle, business, oldVehicle) {
+    const finalPrice = Math.max(0, Number(newVehicle.price) - Number(oldVehicle.trade_value));
+    const embed = new EmbedBuilder()
+        .setTitle('Confirm Business Fleet Trade-In')
+        .setColor(5763719)
+        .addFields(
+            { name: 'Business', value: business.name, inline: false },
+            { name: 'New Vehicle', value: `${newVehicle.label || newVehicle.vehicle_model}\n$${Number(newVehicle.price).toLocaleString()}`, inline: true },
+            { name: 'Trade-In', value: `${oldVehicle.vehicle_label} [${oldVehicle.plate}]\n-$${Number(oldVehicle.trade_value).toLocaleString()}`, inline: true },
+            { name: 'Final Price', value: `**$${finalPrice.toLocaleString()}**`, inline: false }
+        )
+        .setFooter({ text: 'The traded vehicle is permanently removed only after the replacement purchase succeeds.' })
+        .setTimestamp(new Date());
+
+    return {
+        embed,
+        row: new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`shop_trade_confirm:${newVehicle.vehicle_model}:${oldVehicle.id}`)
+                .setLabel('Confirm Trade-In')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('shop_buy_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+        )
+    };
 }
 
 
@@ -2013,86 +2133,215 @@ async function purchaseBusinessForCharacter(interaction, businessKey, characterI
 }
 
 
-async function purchaseVehicleForUser(interaction, model) {
+function buildVehicleCharacterSelect(model, characters) {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`shop_character_select:${model}`)
+            .setPlaceholder('Choose which character will own this vehicle')
+            .addOptions(characters.slice(0, 25).map(c => ({
+                label: `${c.first_name} ${c.last_name}`.slice(0, 100),
+                description: `${c.character_id} • ${c.citizen_id}`.slice(0, 100),
+                value: c.character_id
+            })))
+    );
+}
+
+async function chooseVehicleCharacter(interaction, model) {
+    const [vehicleRows] = await pool.query(
+        'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1', [model]
+    );
+    if (!vehicleRows.length) return interaction.reply({ content: 'Vehicle not found.', flags: MessageFlags.Ephemeral });
+    if (businessTypeForVehicle(vehicleRows[0])) return purchaseVehicleForUser(interaction, model, null, null);
+
+    const characters = await getDiscordCharacters(interaction.user.id);
+    if (!characters.length) {
+        return interaction.reply({ content: 'Create and select a GALRP character in-game before buying a personal vehicle.', flags: MessageFlags.Ephemeral });
+    }
+    if (characters.length === 1) return purchaseVehicleForUser(interaction, model, null, characters[0].character_id);
+
+    const payload = { content: `Choose which character will own **${vehicleRows[0].label || model}**.`, embeds: [], components: [buildVehicleCharacterSelect(model, characters)] };
+    if (interaction.isButton() || interaction.isStringSelectMenu()) return interaction.update(payload);
+    return interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+}
+
+async function purchaseVehicleForUser(interaction, model, tradeFleetId = null, selectedCharacterId = null) {
     const discordId = interaction.user.id;
     const member = await interaction.guild.members.fetch(discordId);
+    const connection = await pool.getConnection();
 
-    const [vehicleRows] = await pool.query(
-        'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1',
-        [model]
-    );
+    try {
+        await connection.beginTransaction();
 
-    if (!vehicleRows.length) {
-        return interaction.reply({ content: 'Vehicle not found in shop.', flags: MessageFlags.Ephemeral });
-    }
+        const [vehicleRows] = await connection.query(
+            'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1 FOR UPDATE',
+            [model]
+        );
+        if (!vehicleRows.length) throw new Error('Vehicle not found in shop.');
 
-    const vehicle = vehicleRows[0];
+        const vehicle = vehicleRows[0];
+        const category = String(vehicle.category || 'car').toLowerCase().trim();
+        const isPushBike = category === 'pushbike';
+        const business = await getOwnedBusinessForVehicle(discordId, vehicle, connection);
 
-    const vehicleCategory = String(vehicle.category || 'car').toLowerCase().trim();
-    const isPushBike = vehicleCategory === 'pushbike';
-    const effectiveLicence = getEffectiveVehicleLicence(vehicle);
-
-    if (vehicleCategory === 'taxi') {
-        const ownsTaxiBusiness = await ownsBusinessType(discordId, 'taxi');
-
-        if (!ownsTaxiBusiness) {
-            return interaction.reply({
-                content: 'You cannot buy a taxi because you do not own the Taxi business. Use `/business` to check whether Downtown Taxi is available.',
-                flags: MessageFlags.Ephemeral
-            });
+        if (businessTypeForVehicle(vehicle) && !business) {
+            throw new Error(`You cannot buy this ${category} because you do not own the matching business. Use /business first.`);
         }
-    }
 
-    // Road vehicles require the Driver Licence Discord role. Boats, aircraft,
-    // motorcycles and business vehicles use their own licence/permit instead.
-    if (effectiveLicence === 'driver' && !memberHasDriversLicence(member)) {
-        return interaction.reply({ content: driversLicenceDeniedReply(), flags: MessageFlags.Ephemeral });
-    }
+        if (!isPushBike && !memberHasDriversLicence(member)) throw new Error(driversLicenceDeniedReply());
 
-    if (effectiveLicence) {
-        const allowed = await hasLicence(discordId, effectiveLicence);
-        if (!allowed) {
-            const licenceData = LICENCE_SHOP[effectiveLicence];
-            return interaction.reply({
-                content: `You need **${licenceData ? licenceData.label : effectiveLicence}** to buy this vehicle. Use /licences first.`,
-                flags: MessageFlags.Ephemeral
-            });
+        if (vehicle.required_licence) {
+            const allowed = await hasLicence(discordId, vehicle.required_licence);
+            if (!allowed) {
+                const licenceData = LICENCE_SHOP[vehicle.required_licence];
+                throw new Error(`You need ${licenceData ? licenceData.label : vehicle.required_licence} to buy this vehicle. Use /licences first.`);
+            }
         }
+
+        const [linkRows] = await connection.query(
+            'SELECT * FROM bot_links WHERE discord_id = ? LIMIT 1',
+            [discordId]
+        );
+        if (!linkRows.length) throw new Error('Your Discord is not linked to FiveM yet. Use /linkdiscord in-game first.');
+
+        let selectedCharacter = null;
+        if (!business) {
+            if (!selectedCharacterId) throw new Error('Select which character will own this vehicle.');
+            const [characterRows] = await connection.query(
+                `SELECT character_id, citizen_id, first_name, last_name
+                 FROM galrp_characters
+                 WHERE BINARY character_id = BINARY ?
+                   AND BINARY owner_discord = BINARY ?
+                   AND is_deleted = 0
+                 LIMIT 1 FOR UPDATE`,
+                [selectedCharacterId, discordId]
+            );
+            if (!characterRows.length) throw new Error('That character does not belong to your Discord account.');
+            selectedCharacter = characterRows[0];
+        }
+
+        let tradeVehicle = null;
+        let tradeValue = 0;
+
+        if (tradeFleetId !== null) {
+            if (!business) throw new Error('Only business fleet purchases can use a trade-in.');
+
+            const [tradeRows] = await connection.query(
+                `SELECT f.*, COALESCE(s.price, 0) AS shop_price,
+                        COALESCE(s.label, f.vehicle_model) AS vehicle_label
+                 FROM galrp_business_fleet f
+                 LEFT JOIN bot_vehicle_shop s ON LOWER(s.vehicle_model) = LOWER(f.vehicle_model)
+                 WHERE f.id = ? AND BINARY f.business_key = BINARY ?
+                 LIMIT 1 FOR UPDATE`,
+                [tradeFleetId, business.business_key]
+            );
+
+            if (!tradeRows.length) throw new Error('That business vehicle is no longer available to trade.');
+            tradeVehicle = tradeRows[0];
+            if (String(tradeVehicle.status) === 'impounded') throw new Error('An impounded vehicle cannot be traded in.');
+            tradeValue = calculateTradeInValue(tradeVehicle);
+        }
+
+        const finalPrice = Math.max(0, Number(vehicle.price) - tradeValue);
+        const [balanceRows] = await connection.query(
+            'SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1 FOR UPDATE',
+            [discordId]
+        );
+        const currentBalance = balanceRows.length ? Number(balanceRows[0].balance) : 0;
+        if (currentBalance < finalPrice) {
+            throw new Error(`You need $${finalPrice.toLocaleString()} but only have $${currentBalance.toLocaleString()}.`);
+        }
+
+        const plate = generatePlate();
+        const claimCode = generateClaimCode();
+
+        await connection.query(
+            'UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?',
+            [finalPrice, discordId]
+        );
+
+        if (tradeVehicle) {
+            const [deleted] = await connection.query(
+                'DELETE FROM galrp_business_fleet WHERE id = ? AND BINARY business_key = BINARY ?',
+                [tradeVehicle.id, business.business_key]
+            );
+            if (!deleted.affectedRows) throw new Error('The trade-in vehicle changed before purchase. No transaction was completed.');
+        }
+
+        await connection.query(
+            `INSERT INTO bot_vehicle_purchases
+             (discord_id, license, character_id, citizen_id, vehicle_model, plate, claimed, claim_code, claimed_at,
+              business_key, trade_in_plate, trade_in_value)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?)`,
+            [
+                discordId,
+                linkRows[0].license,
+                selectedCharacter ? selectedCharacter.character_id : null,
+                selectedCharacter ? selectedCharacter.citizen_id : null,
+                vehicle.vehicle_model,
+                plate,
+                claimCode,
+                business ? business.business_key : null,
+                tradeVehicle ? tradeVehicle.plate : null,
+                tradeValue
+            ]
+        );
+
+        if (business) {
+            await connection.query(
+                `INSERT INTO galrp_business_transactions
+                 (business_key, character_id, transaction_type, amount, description)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [
+                    business.business_key,
+                    business.owner_character_id,
+                    tradeVehicle ? 'fleet_trade_in' : 'fleet_purchase',
+                    finalPrice,
+                    tradeVehicle
+                        ? `Purchased ${vehicle.vehicle_model}; traded ${tradeVehicle.vehicle_model} [${tradeVehicle.plate}] for $${tradeValue}`
+                        : `Purchased ${vehicle.vehicle_model} [claim ${claimCode}]`
+                ]
+            );
+        }
+
+        await connection.commit();
+
+        const tradeText = tradeVehicle
+            ? `Trade-In: **${tradeVehicle.vehicle_label} [${tradeVehicle.plate}]** (-$${tradeValue.toLocaleString()})\n`
+            : '';
+        const businessText = business ? `Business: **${business.name}**\n` : '';
+        const characterText = selectedCharacter ? `Owner: **${selectedCharacter.first_name} ${selectedCharacter.last_name}** (${selectedCharacter.character_id})\n` : '';
+
+        const payload = {
+            content:
+                `Bought **${vehicle.label || vehicle.vehicle_model}**\n` +
+                businessText +
+                characterText +
+                `Vehicle Price: **$${Number(vehicle.price).toLocaleString()}**\n` +
+                tradeText +
+                `Final Price: **$${finalPrice.toLocaleString()}**\n` +
+                `Plate: **${plate}**\n` +
+                `Claim Code: **${claimCode}**\n` +
+                `Claim it at the dealership, then park it inside the matching business parking area.`,
+            flags: MessageFlags.Ephemeral
+        };
+
+        if (interaction.isButton() || interaction.isStringSelectMenu()) {
+            return interaction.update({ content: payload.content, embeds: [], components: [] });
+        }
+        return interaction.reply(payload);
+    } catch (error) {
+        await connection.rollback().catch(() => {});
+        const message = error?.message || 'Vehicle purchase failed. No money or vehicle was changed.';
+        if (interaction.replied || interaction.deferred) {
+            return interaction.followUp({ content: message, flags: MessageFlags.Ephemeral });
+        }
+        if (interaction.isButton() || interaction.isStringSelectMenu()) {
+            return interaction.update({ content: message, embeds: [], components: [] });
+        }
+        return interaction.reply({ content: message, flags: MessageFlags.Ephemeral });
+    } finally {
+        connection.release();
     }
-
-    const [linkRows] = await pool.query('SELECT * FROM bot_links WHERE discord_id = ? LIMIT 1', [discordId]);
-
-    if (!linkRows.length) {
-        return interaction.reply({ content: 'Your Discord is not linked to FiveM yet. Use /linkdiscord in-game first.', flags: MessageFlags.Ephemeral });
-    }
-
-    const [balanceRows] = await pool.query('SELECT balance FROM bot_users WHERE discord_id = ? LIMIT 1', [discordId]);
-    const currentBalance = balanceRows.length ? Number(balanceRows[0].balance) : 0;
-
-    if (currentBalance < Number(vehicle.price)) {
-        return interaction.reply({ content: `You need $${vehicle.price} but only have $${currentBalance}.`, flags: MessageFlags.Ephemeral });
-    }
-
-    const plate = generatePlate();
-    const claimCode = generateClaimCode();
-
-    await pool.query('UPDATE bot_users SET balance = balance - ? WHERE discord_id = ?', [vehicle.price, discordId]);
-
-    await pool.query(
-        `INSERT INTO bot_vehicle_purchases
-         (discord_id, license, vehicle_model, plate, claimed, claim_code, claimed_at)
-         VALUES (?, ?, ?, ?, 0, ?, NULL)`,
-        [discordId, linkRows[0].license, vehicle.vehicle_model, plate, claimCode]
-    );
-
-    return interaction.reply({
-        content:
-            `Bought **${vehicle.label || vehicle.vehicle_model}** for **$${vehicle.price}**\n` +
-            `Plate: **${plate}**\n` +
-            `Claim Code: **${claimCode}**\n` +
-            `Go to a dealership ped in-game and enter the code.`,
-        flags: MessageFlags.Ephemeral
-    });
 }
 
 
@@ -2866,6 +3115,33 @@ client.on('interactionCreate', async interaction => {
                 });
             }
 
+            if (interaction.customId.startsWith('shop_trade_select:')) {
+                const model = interaction.customId.split(':')[1];
+                const fleetId = Number(interaction.values[0]);
+                const [vehicleRows] = await pool.query(
+                    'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1',
+                    [model]
+                );
+                if (!vehicleRows.length) {
+                    return interaction.update({ content: 'Vehicle not found.', embeds: [], components: [] });
+                }
+
+                const result = await getBusinessFleetTradeOptions(interaction.user.id, vehicleRows[0]);
+                const oldVehicle = result.vehicles.find(row => Number(row.id) === fleetId);
+                if (!result.business || !oldVehicle) {
+                    return interaction.update({ content: 'That trade-in vehicle is no longer available.', embeds: [], components: [] });
+                }
+
+                const view = buildTradeConfirm(vehicleRows[0], result.business, oldVehicle);
+                return interaction.update({ content: '', embeds: [view.embed], components: [view.row] });
+            }
+
+            if (interaction.customId.startsWith('shop_character_select:')) {
+                const model = interaction.customId.split(':')[1];
+                const characterId = interaction.values[0];
+                return purchaseVehicleForUser(interaction, model, null, characterId);
+            }
+
             if (interaction.customId.startsWith('shop_vehicle_select:')) {
                 const model = interaction.values[0];
 
@@ -3062,6 +3338,33 @@ client.on('interactionCreate', async interaction => {
                 return interaction.reply({ content: result.message, flags: MessageFlags.Ephemeral });
             }
 
+            if (interaction.customId.startsWith('shop_trade_start:')) {
+                const model = interaction.customId.split(':')[1];
+                const [vehicleRows] = await pool.query(
+                    'SELECT * FROM bot_vehicle_shop WHERE LOWER(vehicle_model) = LOWER(?) LIMIT 1',
+                    [model]
+                );
+                if (!vehicleRows.length) {
+                    return interaction.update({ content: 'Vehicle not found.', embeds: [], components: [] });
+                }
+
+                const result = await getBusinessFleetTradeOptions(interaction.user.id, vehicleRows[0]);
+                if (!result.business) {
+                    return interaction.update({ content: 'You do not own the matching business.', embeds: [], components: [] });
+                }
+                if (!result.vehicles.length) {
+                    return interaction.update({ content: 'This business has no eligible fleet vehicles to trade in.', embeds: [], components: [] });
+                }
+
+                const view = buildFleetTradeSelect(vehicleRows[0], result.business, result.vehicles);
+                return interaction.update({ embeds: [view.embed], components: view.components, content: '' });
+            }
+
+            if (interaction.customId.startsWith('shop_trade_confirm:')) {
+                const [, model, fleetId] = interaction.customId.split(':');
+                return purchaseVehicleForUser(interaction, model, Number(fleetId));
+            }
+
             if (interaction.customId.startsWith('business_confirm:')) {
                 const [, businessKey, characterId] = interaction.customId.split(':');
                 return purchaseBusinessForCharacter(interaction, businessKey, characterId);
@@ -3077,7 +3380,7 @@ client.on('interactionCreate', async interaction => {
 
             if (interaction.customId.startsWith('shop_buy_confirm:')) {
                 const model = interaction.customId.split(':')[1];
-                return purchaseVehicleForUser(interaction, model);
+                return chooseVehicleCharacter(interaction, model);
             }
 
             if (interaction.customId === 'shop_buy_cancel') {
@@ -3411,12 +3714,12 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.commandName === 'buyvehicle') {
             const model = interaction.options.getString('model').toLowerCase();
-            return purchaseVehicleForUser(interaction, model);
+            return chooseVehicleCharacter(interaction, model);
         }
 
         if (interaction.commandName === 'mypurchases') {
             const [purchaseRows] = await pool.query(
-                `SELECT vehicle_model, plate, claim_code
+                `SELECT vehicle_model, plate, claim_code, character_id
                  FROM bot_vehicle_purchases
                  WHERE discord_id = ? AND claimed = 0`,
                 [discordId]
@@ -3430,7 +3733,7 @@ client.on('interactionCreate', async interaction => {
             }
 
             const lines = purchaseRows.map(r =>
-                `**${r.vehicle_model}** | Plate: **${r.plate}** | Code: **${r.claim_code}**`
+                `**${r.vehicle_model}** | Owner: **${r.character_id || 'Legacy/Main Character'}** | Plate: **${r.plate}** | Code: **${r.claim_code}**`
             );
 
             const chunks = [];
